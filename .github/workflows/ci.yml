@@ -34,3 +34,11 @@ jobs:
           run_path="$(uv run nepra smoke)"
           uv run nepra validate-run "$run_path"
 
+      - name: Installed wheel smoke benchmark
+        run: |
+          uv build
+          uv pip install --python .venv/bin/python --force-reinstall --no-deps \
+            dist/nepra_eeg-*.whl
+          smoke_dir="$(mktemp -d)"
+          cd "$smoke_dir"
+          "$GITHUB_WORKSPACE/.venv/bin/nepra" smoke

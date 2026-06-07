@@ -34,6 +34,11 @@ The randomized conditions use epsilon values `0.5, 1, 2, 4, 8`, delta
 `1e-5`, and five independent benchmark seeds. Calibration and held-out
 representations receive independent noise draws.
 
+Within each benchmark seed and perturbation family, epsilon conditions reuse
+the same standard-normal realization and rescale it to the calibrated noise
+level. This common-random-numbers coupling supports paired visual comparisons;
+epsilon conditions should not be interpreted as statistically independent.
+
 ## Motor-Task Evaluation
 
 Each subject receives a separate logistic-regression decoder. The model is
@@ -75,4 +80,3 @@ seeds and delegates fresh randomness to diffprivlib.
 Every run writes the resolved configuration, environment versions, raw metric
 table, aggregate summary, manifest, and plots. `nepra validate-run` checks the
 artifact schema.
-
