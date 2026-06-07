@@ -10,6 +10,7 @@ All notable changes to NEPRA are documented in this file.
   wheels, so `nepra smoke` works outside a repository checkout.
 - Updated repository and citation metadata after the GitHub rename.
 - Added installed-wheel verification to CI.
+- Updated CI actions to their Node.js 24 majors.
 - Documented common-random-numbers coupling across epsilon conditions.
 
 ## 0.1.0 - 2026-06-07
