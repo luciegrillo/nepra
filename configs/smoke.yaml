@@ -1,0 +1,38 @@
+schema_version: 1
+
+run:
+  name: synthetic-smoke
+  output_dir: artifacts/runs
+
+dataset:
+  name: synthetic
+  subjects: [1, 2, 3, 4]
+  classes: [left_hand, right_hand, feet, tongue]
+  cache_dir: ~/.cache/nepra
+  resample_hz: 64
+  fmin: 8.0
+  fmax: 30.0
+  tmin: 0.0
+  tmax: 2.0
+  trials_per_class: 8
+  channels: 8
+
+privacy:
+  epsilons: [1.0, 4.0]
+  delta: 0.00001
+  clipping_percentile: 95.0
+  weight_floor: 0.25
+  weight_exponent: 1.0
+  seeds: [42]
+
+models:
+  task_c: 1.0
+  attacker_c: 1.0
+  rf_estimators: 40
+  mlp_hidden: [32]
+  max_iter: 150
+
+evaluation:
+  bootstrap_samples: 200
+  n_jobs: 1
+
