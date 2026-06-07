@@ -31,6 +31,9 @@ dependencies = [
     "scipy>=1.15,<2",
 ]
 
+[project.scripts]
+nepra = "nepra.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=9,<10",

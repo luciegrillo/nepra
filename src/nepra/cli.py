@@ -1,0 +1,76 @@
+"""NEPRA command-line interface."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from nepra.config import ConfigError, load_config
+from nepra.data import download_dataset, load_dataset
+from nepra.evaluation import run_benchmark
+from nepra.reporting import validate_run, write_run
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="nepra",
+        description="Reproducible identity-leakage benchmark for Riemannian EEG.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    smoke = subparsers.add_parser("smoke", help="run the offline synthetic benchmark")
+    smoke.add_argument("--config", default="configs/smoke.yaml")
+
+    data = subparsers.add_parser("data", help="manage benchmark datasets")
+    data_subparsers = data.add_subparsers(dest="data_command", required=True)
+    download = data_subparsers.add_parser("download", help="download configured EEG data")
+    download.add_argument("--config", required=True)
+    download.add_argument("--force", action="store_true")
+
+    run = subparsers.add_parser("run", help="run a configured benchmark")
+    run.add_argument("--config", required=True)
+
+    validate = subparsers.add_parser("validate-run", help="validate a run artifact directory")
+    validate.add_argument("path")
+    return parser
+
+
+def _execute_benchmark(config_path: str) -> Path:
+    config = load_config(config_path)
+    dataset = load_dataset(config.dataset)
+    result = run_benchmark(config, dataset)
+    return write_run(config, result)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Execute the NEPRA CLI."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "smoke":
+            output = _execute_benchmark(args.config)
+            print(output)
+            return 0
+        if args.command == "run":
+            output = _execute_benchmark(args.config)
+            print(output)
+            return 0
+        if args.command == "data" and args.data_command == "download":
+            config = load_config(args.config)
+            cache = download_dataset(config.dataset, force=args.force)
+            print(cache)
+            return 0
+        if args.command == "validate-run":
+            validate_run(args.path)
+            print(Path(args.path).resolve())
+            return 0
+    except (ConfigError, OSError, RuntimeError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    parser.error("unhandled command")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -80,7 +80,7 @@ def build_identity_attackers(config: ModelConfig, seed: int, n_jobs: int) -> Map
                     MLPClassifier(
                         hidden_layer_sizes=config.mlp_hidden,
                         activation="relu",
-                        early_stopping=False,
+                        early_stopping=True,
                         max_iter=config.max_iter,
                         n_iter_no_change=20,
                         tol=1e-3,

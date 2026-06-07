@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 from sklearn.base import clone
 from sklearn.metrics import balanced_accuracy_score, f1_score
+from sklearn.preprocessing import LabelEncoder
 
 from nepra.config import ExperimentConfig
 from nepra.data import EEGDataset
@@ -75,6 +76,16 @@ class BenchmarkResult:
     elapsed_seconds: float
 
 
+@dataclass(frozen=True)
+class FittedAttacker:
+    model: Any
+    label_encoder: LabelEncoder
+
+    def predict(self, features: FloatArray) -> LabelArray:
+        encoded = np.asarray(self.model.predict(features), dtype=np.int64)
+        return np.asarray(self.label_encoder.inverse_transform(encoded), dtype=str)
+
+
 def _derived_seed(seed: int, stream: int) -> int:
     return int(np.random.SeedSequence([seed, stream]).generate_state(1)[0])
 
@@ -124,20 +135,22 @@ def _fit_attackers(
     calibration: FeatureDataset,
     config: ExperimentConfig,
     model_seed: int,
-) -> dict[str, Any]:
-    fitted: dict[str, Any] = {}
+) -> dict[str, FittedAttacker]:
+    fitted: dict[str, FittedAttacker] = {}
+    encoder = LabelEncoder().fit(calibration.subject_labels)
+    encoded_labels = encoder.transform(calibration.subject_labels)
     for name, attacker in build_identity_attackers(
         config.models, model_seed, config.evaluation.n_jobs
     ).items():
         model = clone(attacker)
-        model.fit(calibration.features, calibration.subject_labels)
-        fitted[name] = model
+        model.fit(calibration.features, encoded_labels)
+        fitted[name] = FittedAttacker(model=model, label_encoder=encoder)
     return fitted
 
 
 def _score_attackers(
     *,
-    attackers: dict[str, Any],
+    attackers: dict[str, FittedAttacker],
     heldout: FeatureDataset,
     condition: Condition,
     regime: str,
@@ -145,7 +158,7 @@ def _score_attackers(
     chance = 1.0 / len(np.unique(heldout.subject_labels))
     scores: list[AttackScore] = []
     for name, attacker in attackers.items():
-        predictions = np.asarray(attacker.predict(heldout.features), dtype=str)
+        predictions = attacker.predict(heldout.features)
         balanced_accuracy = float(balanced_accuracy_score(heldout.subject_labels, predictions))
         scores.append(
             AttackScore(
