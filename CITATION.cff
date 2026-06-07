@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use NEPRA, please cite this software."
+title: "NEPRA: Identity-Leakage Mitigation Benchmark for Riemannian EEG"
+type: software
+authors:
+  - family-names: Grillo
+    given-names: Lucie
+repository-code: "https://github.com/luciegrillo/NP-prototype"
+version: 0.1.0
+date-released: 2026-06-07
+license: Apache-2.0
+keywords:
+  - EEG
+  - brain-computer interface
+  - Riemannian geometry
+  - differential privacy
+  - identity leakage
+
