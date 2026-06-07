@@ -1,13 +1,26 @@
 # NEPRA
 
 NEPRA is a reproducible benchmark for studying identity leakage mitigation in
-Riemannian EEG representations.
+Riemannian EEG representations. It compares motor-imagery utility with
+subject-identification attacks under clipping, isotropic Gaussian
+randomization, and task-aware empirical perturbation.
 
-The project is being reconstructed as an engineering portfolio artifact. Its
-scientific scope, executable benchmark, and limitations will be introduced in
-small, verifiable commits before the first public release.
+The benchmark deliberately separates two kinds of evidence:
 
-NEPRA is research software. It is not a medical device or a privacy product.
+- a conditionally formal, trial-level local differential privacy baseline for
+  inference-time tangent vectors;
+- empirical identity-obfuscation results against a documented attack suite.
+
+These statements are not interchangeable. Read the
+[threat model](docs/threat-model.md) and [methodology](docs/methodology.md)
+before interpreting results.
+
+## Documentation
+
+- [Methodology and claim boundaries](docs/methodology.md)
+- [Threat model](docs/threat-model.md)
+- [Known limitations](docs/limitations.md)
+- [Scientific references](docs/references.md)
 
 ## Development
 
@@ -17,6 +30,14 @@ environment and dependency management.
 ```bash
 uv sync --frozen
 ```
+
+The executable benchmark is introduced progressively before the first public
+release.
+
+## Intended Use
+
+NEPRA is research and educational software. It is not a medical device,
+an anonymization service, or a production privacy system.
 
 ## License
 
