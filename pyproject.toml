@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nepra-eeg"
+version = "0.0.0"
+description = "A reproducible benchmark for identity leakage mitigation in Riemannian EEG representations"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+authors = [
+    { name = "Lucie Grillo" },
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "diffprivlib>=0.6.6,<0.7",
+    "matplotlib>=3.10,<4",
+    "moabb==1.5.0",
+    "numpy>=2.2,<3",
+    "pandas>=2.2,<4",
+    "pyriemann>=0.11,<0.12",
+    "pyyaml>=6,<7",
+    "scikit-learn>=1.8,<2",
+    "scipy>=1.15,<2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9,<10",
+    "pytest-cov>=7,<8",
+    "ruff>=0.14,<0.15",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nepra"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+
