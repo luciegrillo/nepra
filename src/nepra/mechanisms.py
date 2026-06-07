@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from diffprivlib.mechanisms import GaussianAnalytic
 from numpy.typing import NDArray
+from sklearn.linear_model import LogisticRegression
 
 from nepra.data import CALIBRATION_SESSION
 from nepra.geometry import FeatureDataset
@@ -157,3 +158,107 @@ class AnalyticGaussianRandomizer:
             )
             randomized = dataset.features + noise
         return dataset.with_features(randomized)
+
+
+@dataclass(frozen=True)
+class TaskWeightModel:
+    """Task importance and RMS-normalized empirical noise weights."""
+
+    importance: FloatArray
+    weights: FloatArray
+
+    def __post_init__(self) -> None:
+        if self.importance.ndim != 1 or self.weights.ndim != 1:
+            raise ValueError("importance and weights must be one-dimensional")
+        if self.importance.shape != self.weights.shape:
+            raise ValueError("importance and weights must have equal shape")
+        if np.any(self.weights <= 0):
+            raise ValueError("all empirical noise weights must be positive")
+        if not np.isclose(np.mean(np.square(self.weights)), 1.0):
+            raise ValueError("empirical weights must have unit RMS")
+
+
+def fit_task_weights(
+    calibration: FeatureDataset,
+    *,
+    task_c: float,
+    weight_floor: float,
+    weight_exponent: float,
+    max_iter: int,
+    seed: int,
+) -> TaskWeightModel:
+    """Fit task-aware empirical noise weights on public calibration data."""
+    sessions = set(calibration.session_labels)
+    if sessions != {CALIBRATION_SESSION}:
+        raise ValueError(
+            "task weights require only the public calibration session "
+            f"{CALIBRATION_SESSION!r}; received {sorted(sessions)}"
+        )
+    if not 0 < weight_floor <= 1:
+        raise ValueError("weight_floor must be in (0, 1]")
+    if weight_exponent <= 0:
+        raise ValueError("weight_exponent must be positive")
+
+    classifier = LogisticRegression(
+        C=task_c,
+        solver="lbfgs",
+        max_iter=max_iter,
+        random_state=seed,
+    )
+    classifier.fit(calibration.features, calibration.task_labels)
+    importance = np.linalg.norm(classifier.coef_, axis=0)
+    max_importance = float(np.max(importance))
+    if max_importance <= np.finfo(np.float64).eps:
+        relative_weights = np.ones_like(importance)
+    else:
+        normalized_importance = importance / max_importance
+        relative_weights = 1.0 - (1.0 - weight_floor) * normalized_importance
+    curved_weights = np.power(relative_weights, weight_exponent)
+    rms = float(np.sqrt(np.mean(np.square(curved_weights))))
+    weights = curved_weights / rms
+    return TaskWeightModel(
+        importance=np.asarray(importance, dtype=np.float64),
+        weights=np.asarray(weights, dtype=np.float64),
+    )
+
+
+class TaskAwareEmpiricalRandomizer:
+    """Dimension-weighted Gaussian perturbation with matched expected energy."""
+
+    def __init__(
+        self,
+        *,
+        standard_deviation: float,
+        clipping_norm: float,
+        weights: FloatArray,
+        seed: int,
+    ) -> None:
+        if standard_deviation <= 0:
+            raise ValueError("standard_deviation must be positive")
+        if clipping_norm <= 0:
+            raise ValueError("clipping_norm must be positive")
+        values = np.asarray(weights, dtype=np.float64)
+        if values.ndim != 1 or np.any(values <= 0):
+            raise ValueError("weights must be a positive one-dimensional vector")
+        if not np.isclose(np.mean(np.square(values)), 1.0):
+            raise ValueError("weights must have unit RMS")
+        self.standard_deviation = float(standard_deviation)
+        self.clipping_norm = float(clipping_norm)
+        self.weights = values
+        self.seed = int(seed)
+
+    def transform(self, dataset: FeatureDataset) -> FeatureDataset:
+        """Add task-weighted Gaussian noise to clipped features."""
+        if dataset.features.shape[1] != self.weights.shape[0]:
+            raise ValueError("weight count does not match feature dimensions")
+        norms = np.linalg.norm(dataset.features, axis=1)
+        tolerance = np.finfo(np.float64).eps * max(1.0, self.clipping_norm) * 16
+        if np.any(norms > self.clipping_norm + tolerance):
+            raise ValueError("empirical randomization requires features clipped to norm C")
+        rng = np.random.default_rng(self.seed)
+        noise = rng.normal(
+            loc=0.0,
+            scale=self.standard_deviation,
+            size=dataset.features.shape,
+        )
+        return dataset.with_features(dataset.features + noise * self.weights[None, :])
