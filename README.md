@@ -19,6 +19,7 @@ before interpreting results.
 
 - [Methodology and claim boundaries](docs/methodology.md)
 - [Threat model](docs/threat-model.md)
+- [Dataset provenance and access](docs/data-provenance.md)
 - [Known limitations](docs/limitations.md)
 - [Scientific references](docs/references.md)
 
@@ -42,4 +43,3 @@ an anonymization service, or a production privacy system.
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
-

@@ -1,8 +1,10 @@
-"""Dataset containers and deterministic synthetic EEG generation."""
+"""Reproducible EEG access and deterministic synthetic data."""
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
@@ -14,6 +16,7 @@ LabelArray = NDArray[np.str_]
 
 CALIBRATION_SESSION = "0train"
 HELDOUT_SESSION = "1test"
+SUPPORTED_SESSIONS = frozenset({CALIBRATION_SESSION, HELDOUT_SESSION})
 
 
 @dataclass(frozen=True)
@@ -112,3 +115,88 @@ def generate_synthetic_eeg(config: DatasetConfig, seed: int = 2026) -> EEGDatase
         session_labels=np.asarray(session_labels, dtype=str),
         sample_rate=config.resample_hz,
     )
+
+
+def _configure_bnci_cache(cache_dir: Path) -> Path:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    resolved = cache_dir.resolve()
+    os.environ["MNE_DATASETS_BNCI_PATH"] = str(resolved)
+    return resolved
+
+
+def _bnci_dataset(config: DatasetConfig):
+    from moabb.datasets import BNCI2014_001
+
+    dataset = BNCI2014_001(subjects=list(config.subjects))
+    available = set(dataset.subject_list)
+    missing = set(config.subjects) - available
+    if missing:
+        raise ValueError(f"BNCI2014_001 does not contain subjects: {sorted(missing)}")
+    if set(config.classes) != set(dataset.event_id):
+        raise ValueError(
+            f"configured classes do not match BNCI2014_001 events: {sorted(dataset.event_id)}"
+        )
+    return dataset
+
+
+def download_dataset(config: DatasetConfig, force: bool = False) -> Path:
+    """Download the configured real dataset and return its cache directory."""
+    if config.name == "synthetic":
+        raise ValueError("synthetic data is generated locally and has nothing to download")
+    cache_dir = _configure_bnci_cache(config.cache_dir)
+    dataset = _bnci_dataset(config)
+    dataset.download(
+        subject_list=list(config.subjects),
+        path=str(cache_dir),
+        force_update=force,
+        update_path=False,
+        verbose=False,
+    )
+    return cache_dir
+
+
+def load_bnci2014_001(config: DatasetConfig) -> EEGDataset:
+    """Load four-class BNCI2014_001 epochs through MOABB."""
+    from moabb.paradigms import MotorImagery
+
+    _configure_bnci_cache(config.cache_dir)
+    dataset = _bnci_dataset(config)
+    paradigm = MotorImagery(
+        n_classes=len(config.classes),
+        events=list(config.classes),
+        resample=config.resample_hz,
+        fmin=config.fmin,
+        fmax=config.fmax,
+        tmin=config.tmin,
+        tmax=config.tmax,
+    )
+    epochs, task_labels, metadata = paradigm.get_data(
+        dataset=dataset,
+        subjects=list(config.subjects),
+    )
+    session_labels = metadata["session"].astype(str).to_numpy()
+    observed_sessions = set(session_labels)
+    if observed_sessions != SUPPORTED_SESSIONS:
+        raise ValueError(
+            "unexpected BNCI2014_001 sessions: "
+            f"{sorted(observed_sessions)}; expected {sorted(SUPPORTED_SESSIONS)}"
+        )
+    observed_classes = set(np.asarray(task_labels, dtype=str))
+    if observed_classes != set(config.classes):
+        raise ValueError(f"loaded classes {sorted(observed_classes)} do not match configuration")
+    return EEGDataset(
+        epochs=np.asarray(epochs, dtype=np.float64),
+        task_labels=np.asarray(task_labels, dtype=str),
+        subject_labels=metadata["subject"].astype(str).to_numpy(),
+        session_labels=session_labels,
+        sample_rate=config.resample_hz,
+    )
+
+
+def load_dataset(config: DatasetConfig) -> EEGDataset:
+    """Load synthetic data or the configured MOABB benchmark."""
+    if config.name == "synthetic":
+        return generate_synthetic_eeg(config)
+    if config.name == "BNCI2014_001":
+        return load_bnci2014_001(config)
+    raise ValueError(f"unsupported dataset: {config.name}")
