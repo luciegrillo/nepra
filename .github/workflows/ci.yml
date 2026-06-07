@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.19"
+          enable-cache: true
+
+      - name: Install Python and dependencies
+        run: uv sync --frozen --python 3.12
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Test
+        run: uv run pytest --cov=nepra --cov-report=term-missing
+
+      - name: Synthetic smoke benchmark
+        run: |
+          run_path="$(uv run nepra smoke)"
+          uv run nepra validate-run "$run_path"
+
