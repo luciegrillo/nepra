@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from importlib import resources
 from pathlib import Path
 
 from nepra.config import ConfigError, load_config
@@ -20,7 +21,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     smoke = subparsers.add_parser("smoke", help="run the offline synthetic benchmark")
-    smoke.add_argument("--config", default="configs/smoke.yaml")
+    smoke.add_argument("--config")
 
     data = subparsers.add_parser("data", help="manage benchmark datasets")
     data_subparsers = data.add_subparsers(dest="data_command", required=True)
@@ -43,13 +44,21 @@ def _execute_benchmark(config_path: str) -> Path:
     return write_run(config, result)
 
 
+def _execute_smoke(config_path: str | None) -> Path:
+    if config_path is not None:
+        return _execute_benchmark(config_path)
+    packaged_config = resources.files("nepra").joinpath("resources/smoke.yaml")
+    with resources.as_file(packaged_config) as path:
+        return _execute_benchmark(str(path))
+
+
 def main(argv: list[str] | None = None) -> int:
     """Execute the NEPRA CLI."""
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
         if args.command == "smoke":
-            output = _execute_benchmark(args.config)
+            output = _execute_smoke(args.config)
             print(output)
             return 0
         if args.command == "run":

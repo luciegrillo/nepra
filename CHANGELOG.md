@@ -2,6 +2,16 @@
 
 All notable changes to NEPRA are documented in this file.
 
+## 0.1.1 - 2026-06-07
+
+### Fixed
+
+- Made the default synthetic smoke configuration available inside installed
+  wheels, so `nepra smoke` works outside a repository checkout.
+- Updated repository and citation metadata after the GitHub rename.
+- Added installed-wheel verification to CI.
+- Documented common-random-numbers coupling across epsilon conditions.
+
 ## 0.1.0 - 2026-06-07
 
 ### Added
@@ -23,4 +33,3 @@ All notable changes to NEPRA are documented in this file.
 The tested Gaussian conditions reduced subject-identification performance but
 also reduced four-class motor-task utility to chance. The task-aware empirical
 mechanism did not improve the measured trade-off over isotropic noise.
-

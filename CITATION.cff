@@ -5,8 +5,8 @@ type: software
 authors:
   - family-names: Grillo
     given-names: Lucie
-repository-code: "https://github.com/luciegrillo/NP-prototype"
-version: 0.1.0
+repository-code: "https://github.com/luciegrillo/nepra"
+version: 0.1.1
 date-released: 2026-06-07
 license: Apache-2.0
 keywords:
@@ -15,4 +15,3 @@ keywords:
   - Riemannian geometry
   - differential privacy
   - identity leakage
-
