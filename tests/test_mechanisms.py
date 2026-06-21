@@ -59,6 +59,19 @@ def test_gaussian_scale_agrees_with_diffprivlib(
     assert randomizer.standard_deviation == float(reference._scale)
 
 
+def test_gaussian_scale_compatibility_failure_is_explicit() -> None:
+    randomizer = AnalyticGaussianRandomizer(
+        epsilon=1.0,
+        delta=1e-5,
+        clipping_norm=2.0,
+        seed=42,
+    )
+    randomizer._mechanism._scale = None
+
+    with pytest.raises(RuntimeError, match="compatibility layer"):
+        _ = randomizer.standard_deviation
+
+
 def test_secure_gaussian_mode_rejects_seed() -> None:
     with pytest.raises(ValueError, match="does not accept"):
         AnalyticGaussianRandomizer(
