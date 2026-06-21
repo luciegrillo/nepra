@@ -4,7 +4,9 @@ from collections import Counter
 from dataclasses import replace
 
 import numpy as np
+from sklearn.dummy import DummyClassifier
 
+from nepra import evaluation
 from nepra.config import ExperimentConfig
 from nepra.data import EEGDataset
 from nepra.evaluation import BenchmarkResult, bootstrap_mean_interval, run_benchmark
@@ -15,6 +17,7 @@ def test_benchmark_trains_personalized_tasks_and_pooled_attackers(
 ) -> None:
     task_counts = Counter(score.condition for score in benchmark_result.task_scores)
     attack_counts = Counter(score.condition for score in benchmark_result.attack_scores)
+    open_set_counts = Counter(score.condition for score in benchmark_result.open_set_scores)
 
     assert task_counts == {
         "clean": 4,
@@ -23,11 +26,12 @@ def test_benchmark_trains_personalized_tasks_and_pooled_attackers(
         "task_weighted_empirical": 8,
     }
     assert attack_counts == {
-        "clean": 8,
-        "clipped": 8,
-        "analytic_gaussian": 16,
-        "task_weighted_empirical": 16,
+        "clean": 14,
+        "clipped": 14,
+        "analytic_gaussian": 28,
+        "task_weighted_empirical": 28,
     }
+    assert open_set_counts == attack_counts
     assert {score.subject for score in benchmark_result.task_scores} == {
         "1",
         "2",
@@ -36,6 +40,7 @@ def test_benchmark_trains_personalized_tasks_and_pooled_attackers(
     }
     assert {score.dataset for score in benchmark_result.task_scores} == {"synthetic"}
     assert {score.dataset for score in benchmark_result.attack_scores} == {"synthetic"}
+    assert {score.dataset for score in benchmark_result.open_set_scores} == {"synthetic"}
     assert {score.regime for score in benchmark_result.attack_scores} == {
         "clean_auxiliary",
         "mechanism_aware",
@@ -43,15 +48,35 @@ def test_benchmark_trains_personalized_tasks_and_pooled_attackers(
     assert {score.attacker for score in benchmark_result.attack_scores} == {
         "logistic_regression",
         "rbf_svm",
+        "knn",
         "random_forest",
+        "extra_trees",
+        "hist_gradient_boosting",
         "mlp",
     }
+    assert {score.attacker for score in benchmark_result.open_set_scores} == {
+        "logistic_regression",
+        "rbf_svm",
+        "knn",
+        "random_forest",
+        "extra_trees",
+        "hist_gradient_boosting",
+        "mlp",
+    }
+    assert all(0.0 <= score.auroc <= 1.0 for score in benchmark_result.open_set_scores)
+    assert {score.enrolled_subjects for score in benchmark_result.open_set_scores} == {3}
+    assert {score.unknown_subjects for score in benchmark_result.open_set_scores} == {1}
 
 
 def test_benchmark_aggregates_configured_dataset_mapping(
     smoke_config: ExperimentConfig,
     synthetic_dataset: EEGDataset,
+    monkeypatch,
 ) -> None:
+    def dummy_attackers(*args, **kwargs) -> dict[str, DummyClassifier]:
+        return {"dummy": DummyClassifier(strategy="most_frequent")}
+
+    monkeypatch.setattr(evaluation, "build_identity_attackers", dummy_attackers)
     second_dataset_config = replace(smoke_config.dataset, name="BNCI2014_004")
     config = replace(
         smoke_config,
@@ -75,6 +100,10 @@ def test_benchmark_aggregates_configured_dataset_mapping(
         "BNCI2014_004",
     }
     assert {score.dataset for score in result.attack_scores} == {
+        "synthetic",
+        "BNCI2014_004",
+    }
+    assert {score.dataset for score in result.open_set_scores} == {
         "synthetic",
         "BNCI2014_004",
     }

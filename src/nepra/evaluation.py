@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 from sklearn.base import clone
-from sklearn.metrics import balanced_accuracy_score, f1_score
+from sklearn.metrics import balanced_accuracy_score, f1_score, roc_auc_score
 from sklearn.preprocessing import LabelEncoder
 
 from nepra.config import ExperimentConfig
@@ -68,6 +69,19 @@ class AttackScore:
 
 
 @dataclass(frozen=True)
+class OpenSetAttackScore:
+    dataset: str
+    condition: str
+    epsilon: float | None
+    seed: int | None
+    regime: str
+    attacker: str
+    auroc: float
+    enrolled_subjects: int
+    unknown_subjects: int
+
+
+@dataclass(frozen=True)
 class DatasetBenchmarkResult:
     dataset: str
     calibration_clipping: ClippingDiagnostics
@@ -83,6 +97,7 @@ class DatasetBenchmarkResult:
 class BenchmarkResult:
     task_scores: tuple[TaskScore, ...]
     attack_scores: tuple[AttackScore, ...]
+    open_set_scores: tuple[OpenSetAttackScore, ...]
     calibration_clipping: ClippingDiagnostics
     heldout_clipping: ClippingDiagnostics
     task_weights: TaskWeightModel
@@ -102,9 +117,27 @@ class FittedAttacker:
         encoded = np.asarray(self.model.predict(features), dtype=np.int64)
         return np.asarray(self.label_encoder.inverse_transform(encoded), dtype=str)
 
+    def max_probability(self, features: FloatArray) -> FloatArray:
+        probabilities = np.asarray(self.model.predict_proba(features), dtype=np.float64)
+        if probabilities.ndim != 2:
+            raise ValueError("attacker predict_proba must return a 2D array")
+        return np.max(probabilities, axis=1)
+
 
 def _derived_seed(seed: int, stream: int) -> int:
     return int(np.random.SeedSequence([seed, stream]).generate_state(1)[0])
+
+
+def _natural_label_key(value: str) -> tuple[tuple[int, int | str], ...]:
+    parts: list[tuple[int, int | str]] = []
+    for part in re.split(r"(\d+)", value):
+        if not part:
+            continue
+        if part.isdigit():
+            parts.append((0, int(part)))
+        else:
+            parts.append((1, part))
+    return tuple(parts)
 
 
 def _session_accuracy(y_true: LabelArray, y_pred: LabelArray) -> float:
@@ -116,6 +149,35 @@ def _session_accuracy(y_true: LabelArray, y_pred: LabelArray) -> float:
         majority = values[np.argmax(counts)]
         correct += int(majority == subject)
     return correct / len(subjects)
+
+
+def _select_subjects(dataset: FeatureDataset, subjects: tuple[str, ...]) -> FeatureDataset:
+    mask = np.isin(dataset.subject_labels, subjects)
+    if not mask.any():
+        raise ValueError(f"subjects are absent: {list(subjects)}")
+    return FeatureDataset(
+        features=dataset.features[mask],
+        task_labels=dataset.task_labels[mask],
+        subject_labels=dataset.subject_labels[mask],
+        session_labels=dataset.session_labels[mask],
+    )
+
+
+def _open_set_subject_split(subject_labels: LabelArray) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    subjects = tuple(
+        sorted(
+            (str(subject) for subject in np.unique(subject_labels)),
+            key=_natural_label_key,
+        )
+    )
+    if len(subjects) < 3:
+        raise ValueError("open-set identity evaluation requires at least three subjects")
+    unknown_count = max(1, int(np.ceil(0.2 * len(subjects))))
+    enrolled = subjects[:-unknown_count]
+    unknown = subjects[-unknown_count:]
+    if len(enrolled) < 2:
+        raise ValueError("open-set identity evaluation requires at least two enrolled subjects")
+    return enrolled, unknown
 
 
 def _evaluate_task(
@@ -190,6 +252,39 @@ def _score_attackers(
                 macro_f1=float(f1_score(heldout.subject_labels, predictions, average="macro")),
                 advantage_over_chance=balanced_accuracy - chance,
                 session_accuracy=float(_session_accuracy(heldout.subject_labels, predictions)),
+            )
+        )
+    return scores
+
+
+def _score_open_set_attackers(
+    *,
+    attackers: dict[str, FittedAttacker],
+    heldout: FeatureDataset,
+    condition: Condition,
+    regime: str,
+    enrolled_subjects: tuple[str, ...],
+    unknown_subjects: tuple[str, ...],
+) -> list[OpenSetAttackScore]:
+    mask = np.isin(heldout.subject_labels, [*enrolled_subjects, *unknown_subjects])
+    labels = np.isin(heldout.subject_labels[mask], enrolled_subjects).astype(np.int64)
+    if len(np.unique(labels)) != 2:
+        raise ValueError("open-set identity AUROC requires enrolled and unknown held-out trials")
+
+    scores: list[OpenSetAttackScore] = []
+    for name, attacker in attackers.items():
+        membership_scores = attacker.max_probability(heldout.features[mask])
+        scores.append(
+            OpenSetAttackScore(
+                dataset=condition.dataset,
+                condition=condition.name,
+                epsilon=condition.epsilon,
+                seed=condition.seed,
+                regime=regime,
+                attacker=name,
+                auroc=float(roc_auc_score(labels, membership_scores)),
+                enrolled_subjects=len(enrolled_subjects),
+                unknown_subjects=len(unknown_subjects),
             )
         )
     return scores
@@ -336,9 +431,16 @@ def _run_single_dataset_benchmark(
         config=config,
     )
 
+    enrolled_subjects, unknown_subjects = _open_set_subject_split(clean_calibration.subject_labels)
     clean_attackers = _fit_attackers(clean_calibration, config, model_seed)
+    clean_open_set_attackers = _fit_attackers(
+        _select_subjects(clean_calibration, enrolled_subjects),
+        config,
+        model_seed,
+    )
     task_scores: list[TaskScore] = []
     attack_scores: list[AttackScore] = []
+    open_set_scores: list[OpenSetAttackScore] = []
     for condition in conditions:
         task_scores.extend(_evaluate_task(condition, config, model_seed))
         attack_scores.extend(
@@ -347,6 +449,16 @@ def _run_single_dataset_benchmark(
                 heldout=condition.heldout,
                 condition=condition,
                 regime="clean_auxiliary",
+            )
+        )
+        open_set_scores.extend(
+            _score_open_set_attackers(
+                attackers=clean_open_set_attackers,
+                heldout=condition.heldout,
+                condition=condition,
+                regime="clean_auxiliary",
+                enrolled_subjects=enrolled_subjects,
+                unknown_subjects=unknown_subjects,
             )
         )
         mechanism_aware = (
@@ -360,6 +472,25 @@ def _run_single_dataset_benchmark(
                 heldout=condition.heldout,
                 condition=condition,
                 regime="mechanism_aware",
+            )
+        )
+        mechanism_aware_open_set = (
+            clean_open_set_attackers
+            if condition.name == "clean"
+            else _fit_attackers(
+                _select_subjects(condition.calibration, enrolled_subjects),
+                config,
+                model_seed,
+            )
+        )
+        open_set_scores.extend(
+            _score_open_set_attackers(
+                attackers=mechanism_aware_open_set,
+                heldout=condition.heldout,
+                condition=condition,
+                regime="mechanism_aware",
+                enrolled_subjects=enrolled_subjects,
+                unknown_subjects=unknown_subjects,
             )
         )
 
@@ -377,6 +508,7 @@ def _run_single_dataset_benchmark(
     return BenchmarkResult(
         task_scores=tuple(task_scores),
         attack_scores=tuple(attack_scores),
+        open_set_scores=tuple(open_set_scores),
         calibration_clipping=dataset_result.calibration_clipping,
         heldout_clipping=dataset_result.heldout_clipping,
         task_weights=dataset_result.task_weights,
@@ -395,6 +527,7 @@ def _merge_benchmark_results(results: list[BenchmarkResult]) -> BenchmarkResult:
     return BenchmarkResult(
         task_scores=tuple(score for result in results for score in result.task_scores),
         attack_scores=tuple(score for result in results for score in result.attack_scores),
+        open_set_scores=tuple(score for result in results for score in result.open_set_scores),
         calibration_clipping=first.calibration_clipping,
         heldout_clipping=first.heldout_clipping,
         task_weights=first.task_weights,

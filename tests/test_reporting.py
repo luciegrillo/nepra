@@ -55,8 +55,13 @@ def test_run_artifact_round_trip(
         reader = csv.DictReader(handle)
         assert set(reader.fieldnames or ()) == METRIC_COLUMNS
         rows = list(reader)
-        assert len(rows) == 72
+        assert len(rows) == 192
         assert {row["dataset"] for row in rows} == {"synthetic"}
+        assert {row["scope"] for row in rows} == {
+            "utility",
+            "identity_attack",
+            "open_set_identity_attack",
+        }
 
     with (run_dir / "summary.json").open(encoding="utf-8") as handle:
         summary = json.load(handle)
@@ -66,12 +71,17 @@ def test_run_artifact_round_trip(
     assert len(summary["entries"]) == 6
     assert {entry["dataset"] for entry in summary["entries"]} == {"synthetic"}
     assert all("strongest" in entry["identity_attack"] for entry in summary["entries"])
+    assert all("strongest" in entry["open_set_identity_attack"] for entry in summary["entries"])
     for entry in summary["entries"]:
         for candidate in entry["identity_attack"]["all"]:
             assert candidate["observations"] == 1
             for metric in ATTACK_METRICS:
                 assert f"{metric}_mean" in candidate
                 assert candidate[f"{metric}_ci95"] is None
+        for candidate in entry["open_set_identity_attack"]["all"]:
+            assert candidate["observations"] == 1
+            assert "auroc_mean" in candidate
+            assert candidate["auroc_ci95"] is None
 
 
 def test_published_v01_run_validates() -> None:
