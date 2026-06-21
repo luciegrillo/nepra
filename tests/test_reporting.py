@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import csv
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from nepra.cli import main
 from nepra.config import ExperimentConfig
 from nepra.evaluation import BenchmarkResult
-from nepra.reporting import METRIC_COLUMNS, validate_run, write_run
+from nepra.reporting import METRIC_COLUMNS, build_summary, validate_run, write_run
+
+ATTACK_METRICS = (
+    "balanced_accuracy",
+    "macro_f1",
+    "advantage_over_chance",
+    "session_accuracy",
+)
 
 
 def test_run_artifact_round_trip(
@@ -37,6 +45,57 @@ def test_run_artifact_round_trip(
         summary = json.load(handle)
     assert len(summary["entries"]) == 6
     assert all("strongest" in entry["identity_attack"] for entry in summary["entries"])
+    for entry in summary["entries"]:
+        for candidate in entry["identity_attack"]["all"]:
+            assert candidate["observations"] == 1
+            for metric in ATTACK_METRICS:
+                assert f"{metric}_mean" in candidate
+                assert candidate[f"{metric}_ci95"] is None
+
+
+def test_identity_attack_summary_reports_seed_uncertainty(
+    smoke_config: ExperimentConfig,
+    benchmark_result: BenchmarkResult,
+) -> None:
+    original = next(
+        score
+        for score in benchmark_result.attack_scores
+        if score.condition == "analytic_gaussian"
+        and score.epsilon == 1.0
+        and score.regime == "clean_auxiliary"
+        and score.attacker == "logistic_regression"
+    )
+    extra_observation = replace(
+        original,
+        seed=123,
+        balanced_accuracy=original.balanced_accuracy + 0.1,
+        macro_f1=original.macro_f1 + 0.1,
+        advantage_over_chance=original.advantage_over_chance + 0.1,
+        session_accuracy=min(1.0, original.session_accuracy + 0.1),
+    )
+    result = replace(
+        benchmark_result,
+        attack_scores=(*benchmark_result.attack_scores, extra_observation),
+    )
+
+    summary = build_summary(smoke_config, result)
+    entry = next(
+        item
+        for item in summary["entries"]
+        if item["condition"] == "analytic_gaussian" and item["epsilon"] == 1.0
+    )
+    candidate = next(
+        item
+        for item in entry["identity_attack"]["all"]
+        if item["regime"] == "clean_auxiliary" and item["attacker"] == "logistic_regression"
+    )
+
+    assert candidate["observations"] == 2
+    for metric in ATTACK_METRICS:
+        interval = candidate[f"{metric}_ci95"]
+        assert interval is not None
+        assert len(interval) == 2
+        assert interval[0] <= candidate[f"{metric}_mean"] <= interval[1]
 
 
 def test_validation_rejects_incomplete_run(tmp_path: Path) -> None:
