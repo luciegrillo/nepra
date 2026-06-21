@@ -90,6 +90,23 @@ class L2Clipper:
         return ClippingResult(dataset=dataset.with_features(clipped), diagnostics=diagnostics)
 
 
+def _analytic_gaussian_scale(mechanism: GaussianAnalytic) -> float:
+    """Return diffprivlib's scale with an explicit compatibility failure."""
+    scale = getattr(mechanism, "_scale", None)
+    if scale is None:
+        raise RuntimeError(
+            "diffprivlib GaussianAnalytic no longer exposes a calibrated _scale; "
+            "update NEPRA's compatibility layer before reporting benchmark noise scales"
+        )
+    try:
+        value = float(scale)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("diffprivlib GaussianAnalytic returned a non-numeric _scale") from error
+    if not np.isfinite(value) or value <= 0:
+        raise RuntimeError("diffprivlib GaussianAnalytic returned an invalid _scale")
+    return value
+
+
 class AnalyticGaussianRandomizer:
     """Isotropic analytic Gaussian randomization for clipped vectors.
 
@@ -133,7 +150,7 @@ class AnalyticGaussianRandomizer:
     @property
     def standard_deviation(self) -> float:
         """Return diffprivlib's analytically calibrated Gaussian scale."""
-        return float(self._mechanism._scale)
+        return _analytic_gaussian_scale(self._mechanism)
 
     def transform(self, dataset: FeatureDataset) -> FeatureDataset:
         """Randomize an already-clipped feature dataset."""
