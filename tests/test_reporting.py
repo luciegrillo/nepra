@@ -68,6 +68,10 @@ def test_run_artifact_round_trip(
         summary = json.load(handle)
     assert summary["artifact_schema_version"] == 2
     assert summary["datasets"] == ["synthetic"]
+    assert (
+        summary["hierarchical_summary"]["method"] == "dataset_subject_seed_hierarchical_bootstrap"
+    )
+    assert len(summary["hierarchical_summary"]["entries"]) == 6
     assert summary["dataset_summaries"][0]["dataset"] == "synthetic"
     assert len(summary["entries"]) == 6
     assert {entry["dataset"] for entry in summary["entries"]} == {"synthetic"}
@@ -89,6 +93,17 @@ def test_run_artifact_round_trip(
             assert candidate["auroc_ci95"] is None
         assert len(entry["repeated_release_identity_attack"]["group_sizes"]) == 5
         assert len(entry["privacy_composition_basic"]) == 5
+
+    for plot_name in (
+        "privacy-utility.png",
+        "privacy-utility-by-dataset.png",
+        "hierarchical-ci.png",
+        "repeated-release-leakage.png",
+        "open-set-auroc.png",
+    ):
+        plot = run_dir / "plots" / plot_name
+        assert plot.is_file()
+        assert plot.stat().st_size > 0
 
 
 def test_published_v01_run_validates() -> None:
