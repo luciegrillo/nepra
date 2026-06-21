@@ -19,6 +19,7 @@ import numpy as np
 import yaml
 
 from nepra.config import ExperimentConfig
+from nepra.data import CALIBRATION_SESSION, HELDOUT_SESSION
 from nepra.evaluation import BenchmarkResult, bootstrap_mean_interval
 
 ARTIFACT_SCHEMA_VERSION = 1
@@ -338,6 +339,125 @@ def write_run(
     return run_dir
 
 
+def _read_json_object(path: Path) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError(f"{path.name} must contain a JSON object")
+    return data
+
+
+def _load_resolved_config(path: Path) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as handle:
+        data = yaml.safe_load(handle)
+    if not isinstance(data, dict):
+        raise ValueError("resolved-config.yaml must contain a mapping")
+    return data
+
+
+def _nonempty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _finite_metric(row: dict[str, str], column: str) -> bool:
+    try:
+        return np.isfinite(float(row[column]))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _validate_manifest(manifest: dict[str, Any], resolved_config: dict[str, Any]) -> None:
+    if manifest.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("unsupported artifact schema version")
+    if manifest.get("status") != "completed":
+        raise ValueError("run manifest is not completed")
+    if not _nonempty_string(manifest.get("run_id")):
+        raise ValueError("run manifest has an invalid run_id")
+    if manifest.get("public_calibration_session") != CALIBRATION_SESSION:
+        raise ValueError("run manifest has an invalid public calibration session")
+    if manifest.get("protected_session") != HELDOUT_SESSION:
+        raise ValueError("run manifest has an invalid protected session")
+
+    dataset = resolved_config.get("dataset")
+    if not isinstance(dataset, dict):
+        raise ValueError("resolved-config.yaml has no dataset section")
+    if manifest.get("dataset") != dataset.get("name"):
+        raise ValueError("run manifest dataset does not match resolved configuration")
+    if manifest.get("subjects") != dataset.get("subjects"):
+        raise ValueError("run manifest subjects do not match resolved configuration")
+    if manifest.get("classes") != dataset.get("classes"):
+        raise ValueError("run manifest classes do not match resolved configuration")
+    git_commit = manifest.get("git_commit")
+    if git_commit is not None and not _nonempty_string(git_commit):
+        raise ValueError("run manifest has an invalid git_commit")
+
+
+def _validate_environment(environment: dict[str, Any]) -> None:
+    if not _nonempty_string(environment.get("python")):
+        raise ValueError("environment.json has an invalid python value")
+    if not _nonempty_string(environment.get("platform")):
+        raise ValueError("environment.json has an invalid platform value")
+    packages = environment.get("packages")
+    if not isinstance(packages, dict) or not packages:
+        raise ValueError("environment.json has no package versions")
+    invalid_versions = (
+        not _nonempty_string(name) or not _nonempty_string(version)
+        for name, version in packages.items()
+    )
+    if any(invalid_versions):
+        raise ValueError("environment.json has invalid package versions")
+
+
+def _validate_summary(summary: dict[str, Any]) -> None:
+    if summary.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("summary.json has an unsupported artifact schema version")
+    if not _nonempty_string(summary.get("run_name")):
+        raise ValueError("summary.json has an invalid run_name")
+    entries = summary.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("run summary has no benchmark entries")
+    for entry in entries:
+        if not isinstance(entry, dict) or not _nonempty_string(entry.get("condition")):
+            raise ValueError("summary.json contains an invalid benchmark entry")
+        utility = entry.get("utility")
+        identity_attack = entry.get("identity_attack")
+        if not isinstance(utility, dict) or "balanced_accuracy_mean" not in utility:
+            raise ValueError("summary.json contains an invalid utility summary")
+        if not isinstance(identity_attack, dict):
+            raise ValueError("summary.json contains an invalid identity attack summary")
+        strongest = identity_attack.get("strongest")
+        all_attacks = identity_attack.get("all")
+        if not isinstance(strongest, dict) or not isinstance(all_attacks, list) or not all_attacks:
+            raise ValueError("summary.json contains an invalid identity attack summary")
+
+
+def _validate_metrics(path: Path) -> None:
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if set(reader.fieldnames or ()) != METRIC_COLUMNS:
+            raise ValueError("metrics.csv has an invalid schema")
+        rows = list(reader)
+    if not rows:
+        raise ValueError("metrics.csv contains no rows")
+    for row in rows:
+        scope = row.get("scope")
+        if scope not in {"utility", "identity_attack"}:
+            raise ValueError("metrics.csv contains an invalid scope")
+        if not _nonempty_string(row.get("condition")):
+            raise ValueError("metrics.csv contains an invalid condition")
+        if not _finite_metric(row, "balanced_accuracy") or not _finite_metric(row, "macro_f1"):
+            raise ValueError("metrics.csv contains invalid performance metrics")
+        if scope == "utility" and not _nonempty_string(row.get("subject")):
+            raise ValueError("metrics.csv contains a utility row without a subject")
+        if scope == "identity_attack":
+            if not _nonempty_string(row.get("regime")) or not _nonempty_string(row.get("model")):
+                raise ValueError("metrics.csv contains an identity row without attacker metadata")
+            if not _finite_metric(row, "advantage_over_chance") or not _finite_metric(
+                row, "session_accuracy"
+            ):
+                raise ValueError("metrics.csv contains invalid identity metrics")
+
+
 def validate_run(path: str | Path) -> None:
     """Validate the structure and minimum contents of a run directory."""
     run_dir = Path(path)
@@ -348,25 +468,12 @@ def validate_run(path: str | Path) -> None:
     if missing:
         raise ValueError(f"run is missing required files: {sorted(missing)}")
 
-    with (run_dir / "manifest.json").open(encoding="utf-8") as handle:
-        manifest = json.load(handle)
-    if manifest.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION:
-        raise ValueError("unsupported artifact schema version")
-    if manifest.get("status") != "completed":
-        raise ValueError("run manifest is not completed")
+    resolved_config = _load_resolved_config(run_dir / "resolved-config.yaml")
+    _validate_manifest(_read_json_object(run_dir / "manifest.json"), resolved_config)
+    _validate_environment(_read_json_object(run_dir / "environment.json"))
+    _validate_summary(_read_json_object(run_dir / "summary.json"))
+    _validate_metrics(run_dir / "metrics.csv")
 
-    with (run_dir / "summary.json").open(encoding="utf-8") as handle:
-        summary = json.load(handle)
-    if not summary.get("entries"):
-        raise ValueError("run summary has no benchmark entries")
-
-    with (run_dir / "metrics.csv").open(encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if set(reader.fieldnames or ()) != METRIC_COLUMNS:
-            raise ValueError("metrics.csv has an invalid schema")
-        if next(reader, None) is None:
-            raise ValueError("metrics.csv contains no rows")
-
-    plots_dir = run_dir / "plots"
-    if not plots_dir.is_dir() or not any(plots_dir.glob("*.png")):
-        raise ValueError("run contains no PNG plots")
+    plot = run_dir / "plots" / "privacy-utility.png"
+    if not plot.is_file() or plot.stat().st_size == 0:
+        raise ValueError("run contains no privacy-utility plot")
