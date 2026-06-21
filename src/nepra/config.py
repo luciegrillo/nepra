@@ -8,7 +8,10 @@ from typing import Any
 
 import yaml
 
-SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, CURRENT_SCHEMA_VERSION})
+SUPPORTED_DATASETS = frozenset({"synthetic", "BNCI2014_001", "BNCI2014_004", "BNCI2015_001"})
+SESSION_SPLITS = frozenset({"fixed", "first_last"})
 
 
 class ConfigError(ValueError):
@@ -43,6 +46,7 @@ class DatasetConfig:
     tmax: float
     trials_per_class: int
     channels: int
+    session_split: str = "fixed"
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,7 @@ class ExperimentConfig:
     schema_version: int
     run: RunConfig
     dataset: DatasetConfig
+    datasets: tuple[DatasetConfig, ...]
     privacy: PrivacyConfig
     models: ModelConfig
     evaluation: EvaluationConfig
@@ -83,7 +88,14 @@ class ExperimentConfig:
         """Return a YAML-serializable resolved configuration."""
         data = asdict(self)
         data["run"]["output_dir"] = str(self.run.output_dir)
-        data["dataset"]["cache_dir"] = str(self.dataset.cache_dir)
+        if self.schema_version == 1:
+            data.pop("datasets")
+            data["dataset"]["cache_dir"] = str(self.dataset.cache_dir)
+            data["dataset"].pop("session_split")
+        else:
+            data.pop("dataset")
+            for index, dataset in enumerate(self.datasets):
+                data["datasets"][index]["cache_dir"] = str(dataset.cache_dir)
         return data
 
 
@@ -92,35 +104,9 @@ def _positive(value: float, name: str) -> None:
         raise ConfigError(f"{name} must be positive")
 
 
-def _build_config(raw: dict[str, Any]) -> ExperimentConfig:
+def _build_dataset_config(raw: dict[str, Any], *, default_session_split: str) -> DatasetConfig:
     _require_keys(
         raw,
-        {"schema_version", "run", "dataset", "privacy", "models", "evaluation"},
-        "root",
-    )
-    if raw["schema_version"] != SCHEMA_VERSION:
-        raise ConfigError(
-            f"unsupported schema_version={raw['schema_version']}; expected {SCHEMA_VERSION}"
-        )
-
-    run = raw["run"]
-    dataset = raw["dataset"]
-    privacy = raw["privacy"]
-    models = raw["models"]
-    evaluation = raw["evaluation"]
-    for value, name in (
-        (run, "run"),
-        (dataset, "dataset"),
-        (privacy, "privacy"),
-        (models, "models"),
-        (evaluation, "evaluation"),
-    ):
-        if not isinstance(value, dict):
-            raise ConfigError(f"{name} must be a mapping")
-
-    _require_keys(run, {"name", "output_dir"}, "run")
-    _require_keys(
-        dataset,
         {
             "name",
             "subjects",
@@ -133,9 +119,68 @@ def _build_config(raw: dict[str, Any]) -> ExperimentConfig:
             "tmax",
             "trials_per_class",
             "channels",
+            "session_split",
         },
         "dataset",
     )
+    return DatasetConfig(
+        name=str(raw["name"]),
+        subjects=tuple(int(value) for value in raw["subjects"]),
+        classes=tuple(str(value) for value in raw["classes"]),
+        cache_dir=Path(raw["cache_dir"]).expanduser(),
+        resample_hz=float(raw["resample_hz"]),
+        fmin=float(raw["fmin"]),
+        fmax=float(raw["fmax"]),
+        tmin=float(raw["tmin"]),
+        tmax=float(raw["tmax"]),
+        trials_per_class=int(raw["trials_per_class"]),
+        channels=int(raw["channels"]),
+        session_split=str(raw.get("session_split", default_session_split)),
+    )
+
+
+def _build_config(raw: dict[str, Any]) -> ExperimentConfig:
+    schema_version = raw.get("schema_version")
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        raise ConfigError(
+            f"unsupported schema_version={schema_version}; expected one of "
+            f"{sorted(SUPPORTED_SCHEMA_VERSIONS)}"
+        )
+    root_keys = (
+        {"schema_version", "run", "dataset", "privacy", "models", "evaluation"}
+        if schema_version == 1
+        else {"schema_version", "run", "datasets", "privacy", "models", "evaluation"}
+    )
+    _require_keys(raw, root_keys, "root")
+
+    run = raw["run"]
+    privacy = raw["privacy"]
+    models = raw["models"]
+    evaluation = raw["evaluation"]
+    if schema_version == 1:
+        dataset_values = (raw["dataset"],)
+    else:
+        raw_datasets = raw["datasets"]
+        if not isinstance(raw_datasets, list | tuple):
+            raise ConfigError("datasets must be a sequence")
+        dataset_values = tuple(raw_datasets)
+    for value, name in (
+        (run, "run"),
+        (privacy, "privacy"),
+        (models, "models"),
+        (evaluation, "evaluation"),
+    ):
+        if not isinstance(value, dict):
+            raise ConfigError(f"{name} must be a mapping")
+    if not dataset_values:
+        raise ConfigError("datasets cannot be empty")
+    for dataset in dataset_values:
+        if not isinstance(dataset, dict):
+            raise ConfigError("dataset must be a mapping")
+
+    _require_keys(run, {"name", "output_dir"}, "run")
+    if schema_version == 1:
+        dataset_values = ({**dataset_values[0], "session_split": "fixed"},)
     _require_keys(
         privacy,
         {
@@ -154,23 +199,15 @@ def _build_config(raw: dict[str, Any]) -> ExperimentConfig:
         "models",
     )
     _require_keys(evaluation, {"bootstrap_samples", "n_jobs"}, "evaluation")
+    datasets = tuple(
+        _build_dataset_config(dataset, default_session_split="fixed") for dataset in dataset_values
+    )
 
     config = ExperimentConfig(
-        schema_version=SCHEMA_VERSION,
+        schema_version=int(schema_version),
         run=RunConfig(name=str(run["name"]), output_dir=Path(run["output_dir"])),
-        dataset=DatasetConfig(
-            name=str(dataset["name"]),
-            subjects=tuple(int(value) for value in dataset["subjects"]),
-            classes=tuple(str(value) for value in dataset["classes"]),
-            cache_dir=Path(dataset["cache_dir"]).expanduser(),
-            resample_hz=float(dataset["resample_hz"]),
-            fmin=float(dataset["fmin"]),
-            fmax=float(dataset["fmax"]),
-            tmin=float(dataset["tmin"]),
-            tmax=float(dataset["tmax"]),
-            trials_per_class=int(dataset["trials_per_class"]),
-            channels=int(dataset["channels"]),
-        ),
+        dataset=datasets[0],
+        datasets=datasets,
         privacy=PrivacyConfig(
             epsilons=tuple(float(value) for value in privacy["epsilons"]),
             delta=float(privacy["delta"]),
@@ -199,22 +236,30 @@ def validate_config(config: ExperimentConfig) -> None:
     """Validate cross-field configuration constraints."""
     if not config.run.name.strip():
         raise ConfigError("run.name cannot be empty")
-    if config.dataset.name not in {"synthetic", "BNCI2014_001"}:
-        raise ConfigError("dataset.name must be synthetic or BNCI2014_001")
-    if len(config.dataset.subjects) < 2:
-        raise ConfigError("at least two subjects are required for identity attacks")
-    if len(set(config.dataset.subjects)) != len(config.dataset.subjects):
-        raise ConfigError("dataset.subjects must be unique")
-    if len(config.dataset.classes) < 2:
-        raise ConfigError("at least two task classes are required")
-    if not 0 < config.dataset.fmin < config.dataset.fmax:
-        raise ConfigError("dataset frequencies must satisfy 0 < fmin < fmax")
-    if config.dataset.tmin >= config.dataset.tmax:
-        raise ConfigError("dataset times must satisfy tmin < tmax")
-    _positive(config.dataset.resample_hz, "dataset.resample_hz")
-    if config.dataset.name == "synthetic":
-        _positive(config.dataset.trials_per_class, "dataset.trials_per_class")
-        _positive(config.dataset.channels, "dataset.channels")
+    if not config.datasets:
+        raise ConfigError("datasets cannot be empty")
+    names = [dataset.name for dataset in config.datasets]
+    if len(set(names)) != len(names):
+        raise ConfigError("dataset names must be unique within one run")
+    for dataset in config.datasets:
+        if dataset.name not in SUPPORTED_DATASETS:
+            raise ConfigError(f"dataset.name must be one of {sorted(SUPPORTED_DATASETS)}")
+        if dataset.session_split not in SESSION_SPLITS:
+            raise ConfigError(f"dataset.session_split must be one of {sorted(SESSION_SPLITS)}")
+        if len(dataset.subjects) < 2:
+            raise ConfigError("at least two subjects are required for identity attacks")
+        if len(set(dataset.subjects)) != len(dataset.subjects):
+            raise ConfigError("dataset.subjects must be unique")
+        if len(dataset.classes) < 2:
+            raise ConfigError("at least two task classes are required")
+        if not 0 < dataset.fmin < dataset.fmax:
+            raise ConfigError("dataset frequencies must satisfy 0 < fmin < fmax")
+        if dataset.tmin >= dataset.tmax:
+            raise ConfigError("dataset times must satisfy tmin < tmax")
+        _positive(dataset.resample_hz, "dataset.resample_hz")
+        if dataset.name == "synthetic":
+            _positive(dataset.trials_per_class, "dataset.trials_per_class")
+            _positive(dataset.channels, "dataset.channels")
     if not config.privacy.epsilons:
         raise ConfigError("privacy.epsilons cannot be empty")
     for epsilon in config.privacy.epsilons:
