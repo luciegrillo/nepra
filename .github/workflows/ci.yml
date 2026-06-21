@@ -29,6 +29,50 @@ jobs:
       - name: Test
         run: uv run pytest --cov=nepra --cov-report=term-missing
 
+      - name: Dependency audit
+        run: |
+          audit_dir="$(mktemp -d)"
+          uv export --frozen --format requirements-txt --no-dev \
+            --no-emit-project --no-hashes \
+            --output-file "$audit_dir/requirements.txt" >/dev/null
+          uv tool run pip-audit --requirement "$audit_dir/requirements.txt" \
+            --strict --progress-spinner off
+
+      - name: Generate SBOM
+        run: |
+          sbom_dir="$(mktemp -d)"
+          uv tool run --from cyclonedx-bom cyclonedx-py environment .venv \
+            --pyproject pyproject.toml \
+            --output-reproducible \
+            --of JSON \
+            --output-file "$sbom_dir/sbom.json" \
+            --validate
+          uv run python -m json.tool "$sbom_dir/sbom.json" >/dev/null
+          test -s "$sbom_dir/sbom.json"
+
+      - name: Secret scan
+        run: |
+          secrets_json="$(mktemp)"
+          uv tool run detect-secrets scan \
+            --exclude-files '(^|/)(\.git|\.venv|artifacts|\.pytest_cache|\.ruff_cache|__pycache__)/' \
+            --exclude-files '^docs/results/v0\.1/run/metrics\.csv$' \
+            --exclude-files '^docs/results/v0\.1/run/summary\.json$' \
+            --exclude-files '^docs/results/v0\.1/summary\.json$' \
+            --exclude-lines '"git_commit": "[0-9a-f]{40}"' \
+            . > "$secrets_json"
+          uv run python - "$secrets_json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              data = json.load(handle)
+          results = data.get("results", {})
+          if results:
+              print(json.dumps(results, indent=2, sort_keys=True))
+              raise SystemExit(1)
+          print("No secrets detected")
+          PY
+
       - name: Synthetic smoke benchmark
         run: |
           run_path="$(uv run nepra smoke)"
