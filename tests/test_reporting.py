@@ -6,6 +6,8 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from nepra.cli import main
 from nepra.config import ExperimentConfig
 from nepra.evaluation import BenchmarkResult
@@ -17,6 +19,10 @@ ATTACK_METRICS = (
     "advantage_over_chance",
     "session_accuracy",
 )
+
+
+def _write_json(path: Path, data: dict[str, object]) -> None:
+    path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
 
 
 def test_run_artifact_round_trip(
@@ -51,6 +57,10 @@ def test_run_artifact_round_trip(
             for metric in ATTACK_METRICS:
                 assert f"{metric}_mean" in candidate
                 assert candidate[f"{metric}_ci95"] is None
+
+
+def test_published_v01_run_validates() -> None:
+    validate_run("docs/results/v0.1/run")
 
 
 def test_identity_attack_summary_reports_seed_uncertainty(
@@ -107,3 +117,88 @@ def test_validation_rejects_incomplete_run(tmp_path: Path) -> None:
         assert "missing required files" in str(error)
     else:
         raise AssertionError("incomplete run should fail validation")
+
+
+def test_validation_rejects_manifest_session_mismatch(
+    temporary_output_config: ExperimentConfig,
+    benchmark_result: BenchmarkResult,
+) -> None:
+    run_dir = write_run(
+        temporary_output_config,
+        benchmark_result,
+        created_at=datetime(2026, 1, 2, 3, 4, 6, tzinfo=UTC),
+    )
+    manifest_path = run_dir / "manifest.json"
+    with manifest_path.open(encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    manifest["protected_session"] = "0train"
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(ValueError, match="protected session"):
+        validate_run(run_dir)
+
+
+def test_validation_rejects_empty_summary(
+    temporary_output_config: ExperimentConfig,
+    benchmark_result: BenchmarkResult,
+) -> None:
+    run_dir = write_run(
+        temporary_output_config,
+        benchmark_result,
+        created_at=datetime(2026, 1, 2, 3, 4, 7, tzinfo=UTC),
+    )
+    summary_path = run_dir / "summary.json"
+    with summary_path.open(encoding="utf-8") as handle:
+        summary = json.load(handle)
+    summary["entries"] = []
+    _write_json(summary_path, summary)
+
+    with pytest.raises(ValueError, match="benchmark entries"):
+        validate_run(run_dir)
+
+
+def test_validation_rejects_invalid_metrics(
+    temporary_output_config: ExperimentConfig,
+    benchmark_result: BenchmarkResult,
+) -> None:
+    run_dir = write_run(
+        temporary_output_config,
+        benchmark_result,
+        created_at=datetime(2026, 1, 2, 3, 4, 8, tzinfo=UTC),
+    )
+    with (run_dir / "metrics.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(METRIC_COLUMNS))
+        writer.writeheader()
+        writer.writerow(
+            {
+                "scope": "identity_attack",
+                "condition": "clean",
+                "epsilon": "",
+                "seed": "",
+                "subject": "",
+                "regime": "",
+                "model": "logistic_regression",
+                "balanced_accuracy": "0.5",
+                "macro_f1": "0.5",
+                "advantage_over_chance": "0.0",
+                "session_accuracy": "0.5",
+            }
+        )
+
+    with pytest.raises(ValueError, match="attacker metadata"):
+        validate_run(run_dir)
+
+
+def test_validation_rejects_missing_tradeoff_plot(
+    temporary_output_config: ExperimentConfig,
+    benchmark_result: BenchmarkResult,
+) -> None:
+    run_dir = write_run(
+        temporary_output_config,
+        benchmark_result,
+        created_at=datetime(2026, 1, 2, 3, 4, 9, tzinfo=UTC),
+    )
+    (run_dir / "plots" / "privacy-utility.png").unlink()
+
+    with pytest.raises(ValueError, match="privacy-utility plot"):
+        validate_run(run_dir)
