@@ -41,6 +41,12 @@ METRIC_COLUMNS = {
     "advantage_over_chance",
     "session_accuracy",
 }
+ATTACK_METRICS = (
+    "balanced_accuracy",
+    "macro_f1",
+    "advantage_over_chance",
+    "session_accuracy",
+)
 
 
 def _git_commit() -> str | None:
@@ -133,8 +139,25 @@ def _utility_summary(
     return summary
 
 
+def _mean_and_interval(
+    values: list[float],
+    *,
+    config: ExperimentConfig,
+) -> tuple[float, list[float] | None]:
+    mean = float(np.mean(values))
+    if len(values) < 2:
+        return mean, None
+    low, high = bootstrap_mean_interval(
+        values,
+        samples=config.evaluation.bootstrap_samples,
+        seed=config.privacy.seeds[0],
+    )
+    return mean, [low, high]
+
+
 def _attack_summary(
     result: BenchmarkResult,
+    config: ExperimentConfig,
 ) -> dict[tuple[str, float | None], dict[str, Any]]:
     grouped: dict[tuple[str, float | None], dict[tuple[str, str], list[Any]]] = defaultdict(
         lambda: defaultdict(list)
@@ -148,22 +171,17 @@ def _attack_summary(
     for key, attacks in grouped.items():
         candidates: list[dict[str, Any]] = []
         for (regime, attacker), scores in attacks.items():
-            candidates.append(
-                {
-                    "regime": regime,
-                    "attacker": attacker,
-                    "balanced_accuracy_mean": float(
-                        np.mean([score.balanced_accuracy for score in scores])
-                    ),
-                    "macro_f1_mean": float(np.mean([score.macro_f1 for score in scores])),
-                    "advantage_over_chance_mean": float(
-                        np.mean([score.advantage_over_chance for score in scores])
-                    ),
-                    "session_accuracy_mean": float(
-                        np.mean([score.session_accuracy for score in scores])
-                    ),
-                }
-            )
+            candidate: dict[str, Any] = {
+                "regime": regime,
+                "attacker": attacker,
+                "observations": len(scores),
+            }
+            for metric in ATTACK_METRICS:
+                values = [float(getattr(score, metric)) for score in scores]
+                mean, interval = _mean_and_interval(values, config=config)
+                candidate[f"{metric}_mean"] = mean
+                candidate[f"{metric}_ci95"] = interval
+            candidates.append(candidate)
         strongest = max(candidates, key=lambda item: item["balanced_accuracy_mean"])
         summary[key] = {"strongest": strongest, "all": candidates}
     return summary
@@ -172,7 +190,7 @@ def _attack_summary(
 def build_summary(config: ExperimentConfig, result: BenchmarkResult) -> dict[str, Any]:
     """Aggregate utility by subject and identity leakage by strongest attack."""
     utility = _utility_summary(result, config)
-    attacks = _attack_summary(result)
+    attacks = _attack_summary(result, config)
     entries: list[dict[str, Any]] = []
     keys = sorted(
         utility,
