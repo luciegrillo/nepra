@@ -5,8 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import (
+    ExtraTreesClassifier,
+    HistGradientBoostingClassifier,
+    RandomForestClassifier,
+)
 from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -62,14 +67,33 @@ def build_identity_attackers(config: ModelConfig, seed: int, n_jobs: int) -> Map
                         kernel="rbf",
                         gamma="scale",
                         class_weight="balanced",
+                        probability=True,
+                        random_state=seed,
                     ),
                 ),
+            ]
+        ),
+        "knn": Pipeline(
+            [
+                ("scale", StandardScaler()),
+                ("classify", KNeighborsClassifier(n_neighbors=5)),
             ]
         ),
         "random_forest": RandomForestClassifier(
             n_estimators=config.rf_estimators,
             class_weight="balanced_subsample",
             n_jobs=n_jobs,
+            random_state=seed,
+        ),
+        "extra_trees": ExtraTreesClassifier(
+            n_estimators=config.rf_estimators,
+            class_weight="balanced",
+            n_jobs=n_jobs,
+            random_state=seed,
+        ),
+        "hist_gradient_boosting": HistGradientBoostingClassifier(
+            max_iter=config.max_iter,
+            learning_rate=0.08,
             random_state=seed,
         ),
         "mlp": Pipeline(

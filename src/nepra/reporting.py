@@ -44,7 +44,12 @@ METRIC_COLUMNS_V1 = {
     "advantage_over_chance",
     "session_accuracy",
 }
-METRIC_COLUMNS = METRIC_COLUMNS_V1 | {"dataset"}
+METRIC_COLUMNS = METRIC_COLUMNS_V1 | {
+    "dataset",
+    "auroc",
+    "enrolled_subjects",
+    "unknown_subjects",
+}
 ATTACK_METRICS = (
     "balanced_accuracy",
     "macro_f1",
@@ -92,6 +97,9 @@ def _metric_rows(result: BenchmarkResult) -> list[dict[str, Any]]:
                 "macro_f1": score.macro_f1,
                 "advantage_over_chance": None,
                 "session_accuracy": None,
+                "auroc": None,
+                "enrolled_subjects": None,
+                "unknown_subjects": None,
             }
         )
     for score in result.attack_scores:
@@ -109,6 +117,29 @@ def _metric_rows(result: BenchmarkResult) -> list[dict[str, Any]]:
                 "macro_f1": score.macro_f1,
                 "advantage_over_chance": score.advantage_over_chance,
                 "session_accuracy": score.session_accuracy,
+                "auroc": None,
+                "enrolled_subjects": None,
+                "unknown_subjects": None,
+            }
+        )
+    for score in result.open_set_scores:
+        rows.append(
+            {
+                "dataset": score.dataset,
+                "scope": "open_set_identity_attack",
+                "condition": score.condition,
+                "epsilon": score.epsilon,
+                "seed": score.seed,
+                "subject": None,
+                "regime": score.regime,
+                "model": score.attacker,
+                "balanced_accuracy": None,
+                "macro_f1": None,
+                "advantage_over_chance": None,
+                "session_accuracy": None,
+                "auroc": score.auroc,
+                "enrolled_subjects": score.enrolled_subjects,
+                "unknown_subjects": score.unknown_subjects,
             }
         )
     return rows
@@ -201,10 +232,45 @@ def _attack_summary(
     return summary
 
 
+def _open_set_summary(
+    result: BenchmarkResult,
+    config: ExperimentConfig,
+) -> dict[tuple[str, str, float | None], dict[str, Any]]:
+    grouped: dict[tuple[str, str, float | None], dict[tuple[str, str], list[Any]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for score in result.open_set_scores:
+        grouped[_condition_key(score.dataset, score.condition, score.epsilon)][
+            (score.regime, score.attacker)
+        ].append(score)
+
+    summary: dict[tuple[str, str, float | None], dict[str, Any]] = {}
+    for key, attacks in grouped.items():
+        candidates: list[dict[str, Any]] = []
+        for (regime, attacker), scores in attacks.items():
+            values = [float(score.auroc) for score in scores]
+            mean, interval = _mean_and_interval(values, config=config)
+            candidates.append(
+                {
+                    "regime": regime,
+                    "attacker": attacker,
+                    "observations": len(scores),
+                    "enrolled_subjects": scores[0].enrolled_subjects,
+                    "unknown_subjects": scores[0].unknown_subjects,
+                    "auroc_mean": mean,
+                    "auroc_ci95": interval,
+                }
+            )
+        strongest = max(candidates, key=lambda item: item["auroc_mean"])
+        summary[key] = {"strongest": strongest, "all": candidates}
+    return summary
+
+
 def build_summary(config: ExperimentConfig, result: BenchmarkResult) -> dict[str, Any]:
     """Aggregate utility by subject and identity leakage by strongest attack."""
     utility = _utility_summary(result, config)
     attacks = _attack_summary(result, config)
+    open_set = _open_set_summary(result, config)
     entries: list[dict[str, Any]] = []
     keys = sorted(
         utility,
@@ -223,6 +289,7 @@ def build_summary(config: ExperimentConfig, result: BenchmarkResult) -> dict[str
                 "epsilon": epsilon,
                 "utility": utility[key],
                 "identity_attack": attacks[key],
+                "open_set_identity_attack": open_set[key],
             }
         )
     dataset_summaries = [
@@ -518,10 +585,13 @@ def _validate_summary(summary: dict[str, Any]) -> int:
             raise ValueError("summary.json contains an entry without dataset")
         utility = entry.get("utility")
         identity_attack = entry.get("identity_attack")
+        open_set_identity_attack = entry.get("open_set_identity_attack")
         if not isinstance(utility, dict) or "balanced_accuracy_mean" not in utility:
             raise ValueError("summary.json contains an invalid utility summary")
         if not isinstance(identity_attack, dict):
             raise ValueError("summary.json contains an invalid identity attack summary")
+        if schema_version == 2 and not isinstance(open_set_identity_attack, dict):
+            raise ValueError("summary.json contains an invalid open-set identity attack summary")
         strongest = identity_attack.get("strongest")
         all_attacks = identity_attack.get("all")
         if not isinstance(strongest, dict) or not isinstance(all_attacks, list) or not all_attacks:
@@ -546,21 +616,35 @@ def _validate_metrics(path: Path) -> int:
         if schema_version == 2 and not _nonempty_string(row.get("dataset")):
             raise ValueError("metrics.csv contains a row without dataset")
         scope = row.get("scope")
-        if scope not in {"utility", "identity_attack"}:
+        if scope not in {"utility", "identity_attack", "open_set_identity_attack"}:
             raise ValueError("metrics.csv contains an invalid scope")
         if not _nonempty_string(row.get("condition")):
             raise ValueError("metrics.csv contains an invalid condition")
-        if not _finite_metric(row, "balanced_accuracy") or not _finite_metric(row, "macro_f1"):
+        if scope != "open_set_identity_attack" and (
+            not _finite_metric(row, "balanced_accuracy") or not _finite_metric(row, "macro_f1")
+        ):
             raise ValueError("metrics.csv contains invalid performance metrics")
         if scope == "utility" and not _nonempty_string(row.get("subject")):
             raise ValueError("metrics.csv contains a utility row without a subject")
-        if scope == "identity_attack":
-            if not _nonempty_string(row.get("regime")) or not _nonempty_string(row.get("model")):
-                raise ValueError("metrics.csv contains an identity row without attacker metadata")
-            if not _finite_metric(row, "advantage_over_chance") or not _finite_metric(
-                row, "session_accuracy"
-            ):
-                raise ValueError("metrics.csv contains invalid identity metrics")
+        if scope in {"identity_attack", "open_set_identity_attack"} and (
+            not _nonempty_string(row.get("regime")) or not _nonempty_string(row.get("model"))
+        ):
+            raise ValueError("metrics.csv contains an identity row without attacker metadata")
+        if scope == "identity_attack" and (
+            not _finite_metric(row, "advantage_over_chance")
+            or not _finite_metric(row, "session_accuracy")
+        ):
+            raise ValueError("metrics.csv contains invalid identity metrics")
+        if scope == "open_set_identity_attack":
+            if not _finite_metric(row, "auroc"):
+                raise ValueError("metrics.csv contains invalid open-set AUROC")
+            try:
+                enrolled_subjects = int(row["enrolled_subjects"])
+                unknown_subjects = int(row["unknown_subjects"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("metrics.csv contains invalid open-set subject counts") from error
+            if enrolled_subjects <= 0 or unknown_subjects <= 0:
+                raise ValueError("metrics.csv contains invalid open-set subject counts")
     return schema_version
 
 
