@@ -24,6 +24,7 @@ before interpreting results.
 - [Dataset provenance and access](docs/data-provenance.md)
 - [Known limitations](docs/limitations.md)
 - [Scientific references](docs/references.md)
+- [Security policy](SECURITY.md)
 
 ## Quick Start
 
@@ -50,6 +51,10 @@ uv run nepra run --config configs/demo.yaml
 ```
 
 Raw EEG is cached outside the repository at `~/.cache/nepra`.
+
+CI runs linting, tests, dependency audit, SBOM validation, secret scanning, and
+synthetic smoke checks. See the [security policy](SECURITY.md) for scope and
+reporting guidance.
 
 ## Result Snapshot
 

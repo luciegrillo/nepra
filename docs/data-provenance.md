@@ -34,6 +34,10 @@ Users are responsible for reviewing the current source-dataset terms before
 downloading or redistributing derivatives. The Apache-2.0 license in this
 repository applies to NEPRA source code, not to third-party EEG data.
 
+Do not include raw EEG, local MOABB caches, access credentials, or private
+participant data in issues or pull requests. See the
+[security policy](../SECURITY.md) for reporting guidance.
+
 ## Session Semantics
 
 MOABB exposes the original training session as `0train` and the original
@@ -50,4 +54,3 @@ classes are absent.
 The smoke workflow generates deterministic artificial epochs with task,
 subject, and session structure. Synthetic output tests software behavior only
 and must not be used for scientific claims.
-

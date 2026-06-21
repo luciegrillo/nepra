@@ -37,3 +37,6 @@ NEPRA is a small benchmark, not a privacy certification.
 - Secure mode requires fresh secret randomness for every release.
 - Raw EEG data remains under its original dataset terms and is never
   redistributed by this repository.
+- CI security checks, dependency audits, SBOM validation, and secret scanning
+  reduce engineering risk but do not certify NEPRA for production privacy or
+  clinical use.
