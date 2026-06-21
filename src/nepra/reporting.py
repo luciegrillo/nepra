@@ -22,7 +22,8 @@ from nepra.config import ExperimentConfig
 from nepra.data import CALIBRATION_SESSION, HELDOUT_SESSION
 from nepra.evaluation import BenchmarkResult, bootstrap_mean_interval
 
-ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2
+SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, ARTIFACT_SCHEMA_VERSION})
 REQUIRED_FILES = {
     "resolved-config.yaml",
     "manifest.json",
@@ -30,7 +31,7 @@ REQUIRED_FILES = {
     "summary.json",
     "environment.json",
 }
-METRIC_COLUMNS = {
+METRIC_COLUMNS_V1 = {
     "scope",
     "condition",
     "epsilon",
@@ -43,6 +44,7 @@ METRIC_COLUMNS = {
     "advantage_over_chance",
     "session_accuracy",
 }
+METRIC_COLUMNS = METRIC_COLUMNS_V1 | {"dataset"}
 ATTACK_METRICS = (
     "balanced_accuracy",
     "macro_f1",
@@ -78,6 +80,7 @@ def _metric_rows(result: BenchmarkResult) -> list[dict[str, Any]]:
     for score in result.task_scores:
         rows.append(
             {
+                "dataset": score.dataset,
                 "scope": "utility",
                 "condition": score.condition,
                 "epsilon": score.epsilon,
@@ -94,6 +97,7 @@ def _metric_rows(result: BenchmarkResult) -> list[dict[str, Any]]:
     for score in result.attack_scores:
         rows.append(
             {
+                "dataset": score.dataset,
                 "scope": "identity_attack",
                 "condition": score.condition,
                 "epsilon": score.epsilon,
@@ -110,23 +114,27 @@ def _metric_rows(result: BenchmarkResult) -> list[dict[str, Any]]:
     return rows
 
 
-def _condition_key(condition: str, epsilon: float | None) -> tuple[str, float | None]:
-    return condition, epsilon
+def _condition_key(
+    dataset: str,
+    condition: str,
+    epsilon: float | None,
+) -> tuple[str, str, float | None]:
+    return dataset, condition, epsilon
 
 
 def _utility_summary(
     result: BenchmarkResult, config: ExperimentConfig
-) -> dict[tuple[str, float | None], dict[str, Any]]:
-    grouped: dict[tuple[str, float | None], dict[str, list[float]]] = defaultdict(
+) -> dict[tuple[str, str, float | None], dict[str, Any]]:
+    grouped: dict[tuple[str, str, float | None], dict[str, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
-    f1_grouped: dict[tuple[str, float | None], list[float]] = defaultdict(list)
+    f1_grouped: dict[tuple[str, str, float | None], list[float]] = defaultdict(list)
     for score in result.task_scores:
-        key = _condition_key(score.condition, score.epsilon)
+        key = _condition_key(score.dataset, score.condition, score.epsilon)
         grouped[key][score.subject].append(score.balanced_accuracy)
         f1_grouped[key].append(score.macro_f1)
 
-    summary: dict[tuple[str, float | None], dict[str, Any]] = {}
+    summary: dict[tuple[str, str, float | None], dict[str, Any]] = {}
     for key, subjects in grouped.items():
         subject_means = np.asarray(
             [np.mean(values) for values in subjects.values()], dtype=np.float64
@@ -164,16 +172,16 @@ def _mean_and_interval(
 def _attack_summary(
     result: BenchmarkResult,
     config: ExperimentConfig,
-) -> dict[tuple[str, float | None], dict[str, Any]]:
-    grouped: dict[tuple[str, float | None], dict[tuple[str, str], list[Any]]] = defaultdict(
+) -> dict[tuple[str, str, float | None], dict[str, Any]]:
+    grouped: dict[tuple[str, str, float | None], dict[tuple[str, str], list[Any]]] = defaultdict(
         lambda: defaultdict(list)
     )
     for score in result.attack_scores:
-        grouped[_condition_key(score.condition, score.epsilon)][
+        grouped[_condition_key(score.dataset, score.condition, score.epsilon)][
             (score.regime, score.attacker)
         ].append(score)
 
-    summary: dict[tuple[str, float | None], dict[str, Any]] = {}
+    summary: dict[tuple[str, str, float | None], dict[str, Any]] = {}
     for key, attacks in grouped.items():
         candidates: list[dict[str, Any]] = []
         for (regime, attacker), scores in attacks.items():
@@ -202,23 +210,52 @@ def build_summary(config: ExperimentConfig, result: BenchmarkResult) -> dict[str
         utility,
         key=lambda item: (
             item[0],
-            float("-inf") if item[1] is None else item[1],
+            item[1],
+            float("-inf") if item[2] is None else item[2],
         ),
     )
-    for condition, epsilon in keys:
-        key = (condition, epsilon)
+    for dataset, condition, epsilon in keys:
+        key = (dataset, condition, epsilon)
         entries.append(
             {
+                "dataset": dataset,
                 "condition": condition,
                 "epsilon": epsilon,
                 "utility": utility[key],
                 "identity_attack": attacks[key],
             }
         )
+    dataset_summaries = [
+        {
+            "dataset": dataset_result.dataset,
+            "clipping": {
+                "calibration": asdict(dataset_result.calibration_clipping),
+                "heldout": asdict(dataset_result.heldout_clipping),
+                "heldout_to_calibration_p95_ratio": (
+                    dataset_result.heldout_clipping.norm_p95
+                    / dataset_result.calibration_clipping.norm_p95
+                ),
+            },
+            "representation": {
+                "feature_dimensions": dataset_result.feature_dimensions,
+                "calibration_trials": dataset_result.calibration_trials,
+                "heldout_trials": dataset_result.heldout_trials,
+            },
+            "task_weights": {
+                "minimum": float(np.min(dataset_result.task_weights.weights)),
+                "maximum": float(np.max(dataset_result.task_weights.weights)),
+                "rms": float(np.sqrt(np.mean(np.square(dataset_result.task_weights.weights)))),
+            },
+            "elapsed_seconds": dataset_result.elapsed_seconds,
+        }
+        for dataset_result in result.dataset_results
+    ]
     return {
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "run_name": config.run.name,
+        "datasets": [dataset.name for dataset in config.datasets],
         "entries": entries,
+        "dataset_summaries": dataset_summaries,
         "clipping": {
             "calibration": asdict(result.calibration_clipping),
             "heldout": asdict(result.heldout_clipping),
@@ -253,12 +290,15 @@ def _plot_tradeoff(summary: dict[str, Any], output_path: Path) -> None:
         "task_weighted_empirical": "D",
     }
     fig, axis = plt.subplots(figsize=(7.2, 5.0))
+    datasets = {entry.get("dataset") for entry in summary["entries"]}
+    multi_dataset = len(datasets) > 1
     for entry in summary["entries"]:
         condition = entry["condition"]
         utility = entry["utility"]["balanced_accuracy_mean"]
         leakage = entry["identity_attack"]["strongest"]["balanced_accuracy_mean"]
         epsilon = entry["epsilon"]
-        label = condition if epsilon is None else f"{condition}, eps={epsilon:g}"
+        condition_label = condition if epsilon is None else f"{condition}, eps={epsilon:g}"
+        label = f"{entry['dataset']}: {condition_label}" if multi_dataset else condition_label
         axis.scatter(
             leakage,
             utility,
@@ -320,19 +360,34 @@ def write_run(
     summary = build_summary(config, result)
     _write_json(run_dir / "summary.json", summary)
     _write_json(run_dir / "environment.json", _environment())
+    manifest: dict[str, Any] = {
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "run_id": run_id,
+        "status": "completed",
+        "datasets": [
+            {
+                "name": dataset.name,
+                "subjects": list(dataset.subjects),
+                "classes": list(dataset.classes),
+                "session_split": dataset.session_split,
+            }
+            for dataset in config.datasets
+        ],
+        "protected_session": HELDOUT_SESSION,
+        "public_calibration_session": CALIBRATION_SESSION,
+        "git_commit": _git_commit(),
+    }
+    if len(config.datasets) == 1:
+        manifest.update(
+            {
+                "dataset": config.dataset.name,
+                "subjects": list(config.dataset.subjects),
+                "classes": list(config.dataset.classes),
+            }
+        )
     _write_json(
         run_dir / "manifest.json",
-        {
-            "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
-            "run_id": run_id,
-            "status": "completed",
-            "dataset": config.dataset.name,
-            "subjects": list(config.dataset.subjects),
-            "classes": list(config.dataset.classes),
-            "protected_session": "1test",
-            "public_calibration_session": "0train",
-            "git_commit": _git_commit(),
-        },
+        manifest,
     )
     _plot_tradeoff(summary, plots_dir / "privacy-utility.png")
     validate_run(run_dir)
@@ -366,9 +421,27 @@ def _finite_metric(row: dict[str, str], column: str) -> bool:
         return False
 
 
-def _validate_manifest(manifest: dict[str, Any], resolved_config: dict[str, Any]) -> None:
-    if manifest.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION:
-        raise ValueError("unsupported artifact schema version")
+def _artifact_schema_version(data: dict[str, Any], source: str) -> int:
+    version = data.get("artifact_schema_version")
+    if version not in SUPPORTED_ARTIFACT_SCHEMA_VERSIONS:
+        raise ValueError(f"{source} has an unsupported artifact schema version")
+    return int(version)
+
+
+def _resolved_datasets(resolved_config: dict[str, Any]) -> list[dict[str, Any]]:
+    if isinstance(resolved_config.get("datasets"), list):
+        datasets = resolved_config["datasets"]
+    elif isinstance(resolved_config.get("dataset"), dict):
+        datasets = [resolved_config["dataset"]]
+    else:
+        raise ValueError("resolved-config.yaml has no dataset section")
+    if not all(isinstance(dataset, dict) for dataset in datasets):
+        raise ValueError("resolved-config.yaml contains an invalid dataset section")
+    return datasets
+
+
+def _validate_manifest(manifest: dict[str, Any], resolved_config: dict[str, Any]) -> int:
+    schema_version = _artifact_schema_version(manifest, "run manifest")
     if manifest.get("status") != "completed":
         raise ValueError("run manifest is not completed")
     if not _nonempty_string(manifest.get("run_id")):
@@ -378,18 +451,34 @@ def _validate_manifest(manifest: dict[str, Any], resolved_config: dict[str, Any]
     if manifest.get("protected_session") != HELDOUT_SESSION:
         raise ValueError("run manifest has an invalid protected session")
 
-    dataset = resolved_config.get("dataset")
-    if not isinstance(dataset, dict):
-        raise ValueError("resolved-config.yaml has no dataset section")
-    if manifest.get("dataset") != dataset.get("name"):
-        raise ValueError("run manifest dataset does not match resolved configuration")
-    if manifest.get("subjects") != dataset.get("subjects"):
-        raise ValueError("run manifest subjects do not match resolved configuration")
-    if manifest.get("classes") != dataset.get("classes"):
-        raise ValueError("run manifest classes do not match resolved configuration")
+    resolved_datasets = _resolved_datasets(resolved_config)
+    if schema_version == 1:
+        dataset = resolved_datasets[0]
+        if manifest.get("dataset") != dataset.get("name"):
+            raise ValueError("run manifest dataset does not match resolved configuration")
+        if manifest.get("subjects") != dataset.get("subjects"):
+            raise ValueError("run manifest subjects do not match resolved configuration")
+        if manifest.get("classes") != dataset.get("classes"):
+            raise ValueError("run manifest classes do not match resolved configuration")
+    else:
+        manifest_datasets = manifest.get("datasets")
+        if not isinstance(manifest_datasets, list) or not manifest_datasets:
+            raise ValueError("run manifest has no datasets")
+        expected = [
+            {
+                "name": dataset.get("name"),
+                "subjects": dataset.get("subjects"),
+                "classes": dataset.get("classes"),
+                "session_split": dataset.get("session_split", "fixed"),
+            }
+            for dataset in resolved_datasets
+        ]
+        if manifest_datasets != expected:
+            raise ValueError("run manifest datasets do not match resolved configuration")
     git_commit = manifest.get("git_commit")
     if git_commit is not None and not _nonempty_string(git_commit):
         raise ValueError("run manifest has an invalid git_commit")
+    return schema_version
 
 
 def _validate_environment(environment: dict[str, Any]) -> None:
@@ -408,17 +497,25 @@ def _validate_environment(environment: dict[str, Any]) -> None:
         raise ValueError("environment.json has invalid package versions")
 
 
-def _validate_summary(summary: dict[str, Any]) -> None:
-    if summary.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION:
-        raise ValueError("summary.json has an unsupported artifact schema version")
+def _validate_summary(summary: dict[str, Any]) -> int:
+    schema_version = _artifact_schema_version(summary, "summary.json")
     if not _nonempty_string(summary.get("run_name")):
         raise ValueError("summary.json has an invalid run_name")
+    if schema_version == 2:
+        datasets = summary.get("datasets")
+        if not isinstance(datasets, list) or not all(_nonempty_string(item) for item in datasets):
+            raise ValueError("summary.json contains invalid datasets")
+        dataset_summaries = summary.get("dataset_summaries")
+        if not isinstance(dataset_summaries, list) or not dataset_summaries:
+            raise ValueError("summary.json contains invalid dataset summaries")
     entries = summary.get("entries")
     if not isinstance(entries, list) or not entries:
         raise ValueError("run summary has no benchmark entries")
     for entry in entries:
         if not isinstance(entry, dict) or not _nonempty_string(entry.get("condition")):
             raise ValueError("summary.json contains an invalid benchmark entry")
+        if schema_version == 2 and not _nonempty_string(entry.get("dataset")):
+            raise ValueError("summary.json contains an entry without dataset")
         utility = entry.get("utility")
         identity_attack = entry.get("identity_attack")
         if not isinstance(utility, dict) or "balanced_accuracy_mean" not in utility:
@@ -429,17 +526,25 @@ def _validate_summary(summary: dict[str, Any]) -> None:
         all_attacks = identity_attack.get("all")
         if not isinstance(strongest, dict) or not isinstance(all_attacks, list) or not all_attacks:
             raise ValueError("summary.json contains an invalid identity attack summary")
+    return schema_version
 
 
-def _validate_metrics(path: Path) -> None:
+def _validate_metrics(path: Path) -> int:
     with path.open(encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        if set(reader.fieldnames or ()) != METRIC_COLUMNS:
+        fieldnames = set(reader.fieldnames or ())
+        if fieldnames == METRIC_COLUMNS:
+            schema_version = 2
+        elif fieldnames == METRIC_COLUMNS_V1:
+            schema_version = 1
+        else:
             raise ValueError("metrics.csv has an invalid schema")
         rows = list(reader)
     if not rows:
         raise ValueError("metrics.csv contains no rows")
     for row in rows:
+        if schema_version == 2 and not _nonempty_string(row.get("dataset")):
+            raise ValueError("metrics.csv contains a row without dataset")
         scope = row.get("scope")
         if scope not in {"utility", "identity_attack"}:
             raise ValueError("metrics.csv contains an invalid scope")
@@ -456,6 +561,7 @@ def _validate_metrics(path: Path) -> None:
                 row, "session_accuracy"
             ):
                 raise ValueError("metrics.csv contains invalid identity metrics")
+    return schema_version
 
 
 def validate_run(path: str | Path) -> None:
@@ -469,10 +575,14 @@ def validate_run(path: str | Path) -> None:
         raise ValueError(f"run is missing required files: {sorted(missing)}")
 
     resolved_config = _load_resolved_config(run_dir / "resolved-config.yaml")
-    _validate_manifest(_read_json_object(run_dir / "manifest.json"), resolved_config)
+    manifest_version = _validate_manifest(
+        _read_json_object(run_dir / "manifest.json"), resolved_config
+    )
     _validate_environment(_read_json_object(run_dir / "environment.json"))
-    _validate_summary(_read_json_object(run_dir / "summary.json"))
-    _validate_metrics(run_dir / "metrics.csv")
+    summary_version = _validate_summary(_read_json_object(run_dir / "summary.json"))
+    metrics_version = _validate_metrics(run_dir / "metrics.csv")
+    if len({manifest_version, summary_version, metrics_version}) != 1:
+        raise ValueError("run artifact schema versions do not match")
 
     plot = run_dir / "plots" / "privacy-utility.png"
     if not plot.is_file() or plot.stat().st_size == 0:

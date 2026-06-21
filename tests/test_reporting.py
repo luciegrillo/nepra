@@ -39,17 +39,32 @@ def test_run_artifact_round_trip(
     assert main(["validate-run", str(run_dir)]) == 0
     with (run_dir / "manifest.json").open(encoding="utf-8") as handle:
         manifest = json.load(handle)
+    assert manifest["artifact_schema_version"] == 2
+    assert manifest["datasets"] == [
+        {
+            "name": "synthetic",
+            "subjects": [1, 2, 3, 4],
+            "classes": ["left_hand", "right_hand", "feet", "tongue"],
+            "session_split": "fixed",
+        }
+    ]
     assert manifest["protected_session"] == "1test"
     assert manifest["status"] == "completed"
 
     with (run_dir / "metrics.csv").open(encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         assert set(reader.fieldnames or ()) == METRIC_COLUMNS
-        assert len(list(reader)) == 72
+        rows = list(reader)
+        assert len(rows) == 72
+        assert {row["dataset"] for row in rows} == {"synthetic"}
 
     with (run_dir / "summary.json").open(encoding="utf-8") as handle:
         summary = json.load(handle)
+    assert summary["artifact_schema_version"] == 2
+    assert summary["datasets"] == ["synthetic"]
+    assert summary["dataset_summaries"][0]["dataset"] == "synthetic"
     assert len(summary["entries"]) == 6
+    assert {entry["dataset"] for entry in summary["entries"]} == {"synthetic"}
     assert all("strongest" in entry["identity_attack"] for entry in summary["entries"])
     for entry in summary["entries"]:
         for candidate in entry["identity_attack"]["all"]:
@@ -172,6 +187,7 @@ def test_validation_rejects_invalid_metrics(
         writer.writerow(
             {
                 "scope": "identity_attack",
+                "dataset": "synthetic",
                 "condition": "clean",
                 "epsilon": "",
                 "seed": "",
