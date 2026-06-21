@@ -67,8 +67,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "data" and args.data_command == "download":
             config = load_config(args.config)
-            cache = download_dataset(config.dataset, force=args.force)
-            print(cache)
+            caches = [
+                (dataset.name, download_dataset(dataset, force=args.force))
+                for dataset in config.datasets
+            ]
+            if len(caches) == 1:
+                print(caches[0][1])
+            else:
+                for dataset_name, cache in caches:
+                    print(f"{dataset_name}: {cache}")
             return 0
         if args.command == "validate-run":
             validate_run(args.path)

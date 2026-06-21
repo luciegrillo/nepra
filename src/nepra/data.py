@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,13 @@ LabelArray = NDArray[np.str_]
 CALIBRATION_SESSION = "0train"
 HELDOUT_SESSION = "1test"
 SUPPORTED_SESSIONS = frozenset({CALIBRATION_SESSION, HELDOUT_SESSION})
+FIXED_SESSION_SPLIT = "fixed"
+FIRST_LAST_SESSION_SPLIT = "first_last"
+MOABB_DATASET_REGISTRY = {
+    "BNCI2014_001": "BNCI2014_001",
+    "BNCI2014_004": "BNCI2014_004",
+    "BNCI2015_001": "BNCI2015_001",
+}
 
 
 @dataclass(frozen=True)
@@ -62,6 +70,42 @@ class EEGDataset:
         return (
             self.select_session(CALIBRATION_SESSION),
             self.select_session(HELDOUT_SESSION),
+        )
+
+    def with_session_split(self, session_split: str) -> EEGDataset:
+        """Return data restricted to the configured calibration/held-out split."""
+        if session_split == FIXED_SESSION_SPLIT:
+            observed_sessions = set(self.session_labels)
+            if observed_sessions != SUPPORTED_SESSIONS:
+                raise ValueError(
+                    "fixed session split requires sessions "
+                    f"{sorted(SUPPORTED_SESSIONS)}; observed {sorted(observed_sessions)}"
+                )
+            return self
+        if session_split != FIRST_LAST_SESSION_SPLIT:
+            raise ValueError(f"unsupported session split: {session_split}")
+
+        ordered_sessions = _ordered_unique_sessions(self.session_labels)
+        if len(ordered_sessions) < 2:
+            raise ValueError(
+                "first_last session split requires at least two sessions; "
+                f"observed {list(ordered_sessions)}"
+            )
+        calibration_raw = ordered_sessions[0]
+        heldout_raw = ordered_sessions[-1]
+        mask = np.isin(self.session_labels, [calibration_raw, heldout_raw])
+        selected_sessions = self.session_labels[mask]
+        session_labels = np.where(
+            selected_sessions == calibration_raw,
+            CALIBRATION_SESSION,
+            HELDOUT_SESSION,
+        ).astype(str)
+        return EEGDataset(
+            epochs=self.epochs[mask],
+            task_labels=self.task_labels[mask],
+            subject_labels=self.subject_labels[mask],
+            session_labels=session_labels,
+            sample_rate=self.sample_rate,
         )
 
 
@@ -124,19 +168,48 @@ def _configure_bnci_cache(cache_dir: Path) -> Path:
     return resolved
 
 
-def _bnci_dataset(config: DatasetConfig):
-    from moabb.datasets import BNCI2014_001
+def _natural_session_key(value: str) -> tuple[tuple[int, int | str], ...]:
+    parts: list[tuple[int, int | str]] = []
+    for part in re.split(r"(\d+)", value):
+        if not part:
+            continue
+        if part.isdigit():
+            parts.append((0, int(part)))
+        else:
+            parts.append((1, part))
+    return tuple(parts)
 
-    dataset = BNCI2014_001(subjects=list(config.subjects))
+
+def _ordered_unique_sessions(session_labels: LabelArray) -> tuple[str, ...]:
+    return tuple(sorted({str(session) for session in session_labels}, key=_natural_session_key))
+
+
+def _moabb_dataset(config: DatasetConfig):
+    if config.name not in MOABB_DATASET_REGISTRY:
+        raise ValueError(f"unsupported MOABB dataset: {config.name}")
+    from moabb import datasets
+
+    dataset_class = getattr(datasets, MOABB_DATASET_REGISTRY[config.name])
+    dataset = dataset_class(subjects=list(config.subjects))
     available = set(dataset.subject_list)
     missing = set(config.subjects) - available
     if missing:
-        raise ValueError(f"BNCI2014_001 does not contain subjects: {sorted(missing)}")
+        raise ValueError(f"{config.name} does not contain subjects: {sorted(missing)}")
     if set(config.classes) != set(dataset.event_id):
         raise ValueError(
-            f"configured classes do not match BNCI2014_001 events: {sorted(dataset.event_id)}"
+            f"configured classes do not match {config.name} events: {sorted(dataset.event_id)}"
         )
     return dataset
+
+
+def _validate_subject_session_coverage(dataset: EEGDataset) -> None:
+    for subject in np.unique(dataset.subject_labels):
+        sessions = set(dataset.session_labels[dataset.subject_labels == subject])
+        if sessions != SUPPORTED_SESSIONS:
+            raise ValueError(
+                f"subject {subject!r} has sessions {sorted(sessions)}; "
+                f"expected {sorted(SUPPORTED_SESSIONS)}"
+            )
 
 
 def download_dataset(config: DatasetConfig, force: bool = False) -> Path:
@@ -144,7 +217,7 @@ def download_dataset(config: DatasetConfig, force: bool = False) -> Path:
     if config.name == "synthetic":
         raise ValueError("synthetic data is generated locally and has nothing to download")
     cache_dir = _configure_bnci_cache(config.cache_dir)
-    dataset = _bnci_dataset(config)
+    dataset = _moabb_dataset(config)
     dataset.download(
         subject_list=list(config.subjects),
         path=str(cache_dir),
@@ -155,12 +228,12 @@ def download_dataset(config: DatasetConfig, force: bool = False) -> Path:
     return cache_dir
 
 
-def load_bnci2014_001(config: DatasetConfig) -> EEGDataset:
-    """Load four-class BNCI2014_001 epochs through MOABB."""
+def load_moabb_motor_imagery(config: DatasetConfig) -> EEGDataset:
+    """Load a configured MOABB motor-imagery dataset."""
     from moabb.paradigms import MotorImagery
 
     _configure_bnci_cache(config.cache_dir)
-    dataset = _bnci_dataset(config)
+    dataset = _moabb_dataset(config)
     paradigm = MotorImagery(
         n_classes=len(config.classes),
         events=list(config.classes),
@@ -175,28 +248,30 @@ def load_bnci2014_001(config: DatasetConfig) -> EEGDataset:
         subjects=list(config.subjects),
     )
     session_labels = metadata["session"].astype(str).to_numpy()
-    observed_sessions = set(session_labels)
-    if observed_sessions != SUPPORTED_SESSIONS:
-        raise ValueError(
-            "unexpected BNCI2014_001 sessions: "
-            f"{sorted(observed_sessions)}; expected {sorted(SUPPORTED_SESSIONS)}"
-        )
-    observed_classes = set(np.asarray(task_labels, dtype=str))
-    if observed_classes != set(config.classes):
-        raise ValueError(f"loaded classes {sorted(observed_classes)} do not match configuration")
-    return EEGDataset(
+    raw_dataset = EEGDataset(
         epochs=np.asarray(epochs, dtype=np.float64),
         task_labels=np.asarray(task_labels, dtype=str),
         subject_labels=metadata["subject"].astype(str).to_numpy(),
         session_labels=session_labels,
         sample_rate=config.resample_hz,
     )
+    split_dataset = raw_dataset.with_session_split(config.session_split)
+    observed_classes = set(split_dataset.task_labels)
+    if observed_classes != set(config.classes):
+        raise ValueError(f"loaded classes {sorted(observed_classes)} do not match configuration")
+    _validate_subject_session_coverage(split_dataset)
+    return split_dataset
+
+
+def load_bnci2014_001(config: DatasetConfig) -> EEGDataset:
+    """Load four-class BNCI2014_001 epochs through MOABB."""
+    return load_moabb_motor_imagery(config)
 
 
 def load_dataset(config: DatasetConfig) -> EEGDataset:
     """Load synthetic data or the configured MOABB benchmark."""
     if config.name == "synthetic":
         return generate_synthetic_eeg(config)
-    if config.name == "BNCI2014_001":
-        return load_bnci2014_001(config)
+    if config.name in MOABB_DATASET_REGISTRY:
+        return load_moabb_motor_imagery(config)
     raise ValueError(f"unsupported dataset: {config.name}")

@@ -17,6 +17,11 @@ def smoke_config() -> ExperimentConfig:
 
 
 @pytest.fixture(scope="session")
+def v0_2_core_config() -> ExperimentConfig:
+    return load_config("configs/v0.2/core.yaml")
+
+
+@pytest.fixture(scope="session")
 def synthetic_dataset(smoke_config: ExperimentConfig) -> EEGDataset:
     return load_dataset(smoke_config.dataset)
 
