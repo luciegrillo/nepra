@@ -49,6 +49,10 @@ METRIC_COLUMNS = METRIC_COLUMNS_V1 | {
     "auroc",
     "enrolled_subjects",
     "unknown_subjects",
+    "group_size",
+    "group_accuracy",
+    "groups",
+    "max_releases",
 }
 ATTACK_METRICS = (
     "balanced_accuracy",
@@ -100,6 +104,10 @@ def _metric_rows(result: BenchmarkResult) -> list[dict[str, Any]]:
                 "auroc": None,
                 "enrolled_subjects": None,
                 "unknown_subjects": None,
+                "group_size": None,
+                "group_accuracy": None,
+                "groups": None,
+                "max_releases": None,
             }
         )
     for score in result.attack_scores:
@@ -120,6 +128,10 @@ def _metric_rows(result: BenchmarkResult) -> list[dict[str, Any]]:
                 "auroc": None,
                 "enrolled_subjects": None,
                 "unknown_subjects": None,
+                "group_size": None,
+                "group_accuracy": None,
+                "groups": None,
+                "max_releases": None,
             }
         )
     for score in result.open_set_scores:
@@ -140,6 +152,34 @@ def _metric_rows(result: BenchmarkResult) -> list[dict[str, Any]]:
                 "auroc": score.auroc,
                 "enrolled_subjects": score.enrolled_subjects,
                 "unknown_subjects": score.unknown_subjects,
+                "group_size": None,
+                "group_accuracy": None,
+                "groups": None,
+                "max_releases": None,
+            }
+        )
+    for score in result.repeated_release_scores:
+        rows.append(
+            {
+                "dataset": score.dataset,
+                "scope": "repeated_release_identity_attack",
+                "condition": score.condition,
+                "epsilon": score.epsilon,
+                "seed": score.seed,
+                "subject": None,
+                "regime": score.regime,
+                "model": score.attacker,
+                "balanced_accuracy": None,
+                "macro_f1": None,
+                "advantage_over_chance": None,
+                "session_accuracy": None,
+                "auroc": None,
+                "enrolled_subjects": None,
+                "unknown_subjects": None,
+                "group_size": score.group_size,
+                "group_accuracy": score.group_accuracy,
+                "groups": score.groups,
+                "max_releases": score.max_releases,
             }
         )
     return rows
@@ -266,11 +306,77 @@ def _open_set_summary(
     return summary
 
 
+def _repeated_release_summary(
+    result: BenchmarkResult,
+    config: ExperimentConfig,
+) -> dict[tuple[str, str, float | None], dict[str, Any]]:
+    grouped: dict[tuple[str, str, float | None], dict[str, dict[tuple[str, str], list[Any]]]] = (
+        defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    for score in result.repeated_release_scores:
+        grouped[_condition_key(score.dataset, score.condition, score.epsilon)][score.group_size][
+            (score.regime, score.attacker)
+        ].append(score)
+
+    summary: dict[tuple[str, str, float | None], dict[str, Any]] = {}
+    for key, group_sizes in grouped.items():
+        entries: list[dict[str, Any]] = []
+        for group_size, attacks in sorted(
+            group_sizes.items(), key=lambda item: _group_size_key(item[0])
+        ):
+            candidates: list[dict[str, Any]] = []
+            for (regime, attacker), scores in attacks.items():
+                values = [float(score.group_accuracy) for score in scores]
+                mean, interval = _mean_and_interval(values, config=config)
+                candidates.append(
+                    {
+                        "regime": regime,
+                        "attacker": attacker,
+                        "observations": len(scores),
+                        "groups": int(np.sum([score.groups for score in scores])),
+                        "max_releases": int(max(score.max_releases for score in scores)),
+                        "group_accuracy_mean": mean,
+                        "group_accuracy_ci95": interval,
+                    }
+                )
+            strongest = max(candidates, key=lambda item: item["group_accuracy_mean"])
+            entries.append({"group_size": group_size, "strongest": strongest, "all": candidates})
+        summary[key] = {"group_sizes": entries}
+    return summary
+
+
+def _group_size_key(group_size: str) -> tuple[int, int | str]:
+    if group_size == "all":
+        return (1, group_size)
+    return (0, int(group_size))
+
+
+def _basic_composition(
+    repeated_release: dict[str, Any],
+    *,
+    epsilon: float | None,
+    delta: float,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for item in repeated_release["group_sizes"]:
+        max_releases = item["strongest"]["max_releases"]
+        entries.append(
+            {
+                "group_size": item["group_size"],
+                "max_releases": max_releases,
+                "epsilon_basic": None if epsilon is None else float(max_releases * epsilon),
+                "delta_basic": None if epsilon is None else float(max_releases * delta),
+            }
+        )
+    return entries
+
+
 def build_summary(config: ExperimentConfig, result: BenchmarkResult) -> dict[str, Any]:
     """Aggregate utility by subject and identity leakage by strongest attack."""
     utility = _utility_summary(result, config)
     attacks = _attack_summary(result, config)
     open_set = _open_set_summary(result, config)
+    repeated_release = _repeated_release_summary(result, config)
     entries: list[dict[str, Any]] = []
     keys = sorted(
         utility,
@@ -290,6 +396,12 @@ def build_summary(config: ExperimentConfig, result: BenchmarkResult) -> dict[str
                 "utility": utility[key],
                 "identity_attack": attacks[key],
                 "open_set_identity_attack": open_set[key],
+                "repeated_release_identity_attack": repeated_release[key],
+                "privacy_composition_basic": _basic_composition(
+                    repeated_release[key],
+                    epsilon=epsilon,
+                    delta=config.privacy.delta,
+                ),
             }
         )
     dataset_summaries = [
@@ -586,12 +698,18 @@ def _validate_summary(summary: dict[str, Any]) -> int:
         utility = entry.get("utility")
         identity_attack = entry.get("identity_attack")
         open_set_identity_attack = entry.get("open_set_identity_attack")
+        repeated_release_identity_attack = entry.get("repeated_release_identity_attack")
+        composition = entry.get("privacy_composition_basic")
         if not isinstance(utility, dict) or "balanced_accuracy_mean" not in utility:
             raise ValueError("summary.json contains an invalid utility summary")
         if not isinstance(identity_attack, dict):
             raise ValueError("summary.json contains an invalid identity attack summary")
         if schema_version == 2 and not isinstance(open_set_identity_attack, dict):
             raise ValueError("summary.json contains an invalid open-set identity attack summary")
+        if schema_version == 2 and not isinstance(repeated_release_identity_attack, dict):
+            raise ValueError("summary.json contains an invalid repeated-release summary")
+        if schema_version == 2 and not isinstance(composition, list):
+            raise ValueError("summary.json contains an invalid basic composition table")
         strongest = identity_attack.get("strongest")
         all_attacks = identity_attack.get("all")
         if not isinstance(strongest, dict) or not isinstance(all_attacks, list) or not all_attacks:
@@ -616,19 +734,26 @@ def _validate_metrics(path: Path) -> int:
         if schema_version == 2 and not _nonempty_string(row.get("dataset")):
             raise ValueError("metrics.csv contains a row without dataset")
         scope = row.get("scope")
-        if scope not in {"utility", "identity_attack", "open_set_identity_attack"}:
+        if scope not in {
+            "utility",
+            "identity_attack",
+            "open_set_identity_attack",
+            "repeated_release_identity_attack",
+        }:
             raise ValueError("metrics.csv contains an invalid scope")
         if not _nonempty_string(row.get("condition")):
             raise ValueError("metrics.csv contains an invalid condition")
-        if scope != "open_set_identity_attack" and (
+        if scope in {"utility", "identity_attack"} and (
             not _finite_metric(row, "balanced_accuracy") or not _finite_metric(row, "macro_f1")
         ):
             raise ValueError("metrics.csv contains invalid performance metrics")
         if scope == "utility" and not _nonempty_string(row.get("subject")):
             raise ValueError("metrics.csv contains a utility row without a subject")
-        if scope in {"identity_attack", "open_set_identity_attack"} and (
-            not _nonempty_string(row.get("regime")) or not _nonempty_string(row.get("model"))
-        ):
+        if scope in {
+            "identity_attack",
+            "open_set_identity_attack",
+            "repeated_release_identity_attack",
+        } and (not _nonempty_string(row.get("regime")) or not _nonempty_string(row.get("model"))):
             raise ValueError("metrics.csv contains an identity row without attacker metadata")
         if scope == "identity_attack" and (
             not _finite_metric(row, "advantage_over_chance")
@@ -645,6 +770,18 @@ def _validate_metrics(path: Path) -> int:
                 raise ValueError("metrics.csv contains invalid open-set subject counts") from error
             if enrolled_subjects <= 0 or unknown_subjects <= 0:
                 raise ValueError("metrics.csv contains invalid open-set subject counts")
+        if scope == "repeated_release_identity_attack":
+            if not _nonempty_string(row.get("group_size")) or not _finite_metric(
+                row, "group_accuracy"
+            ):
+                raise ValueError("metrics.csv contains invalid repeated-release metrics")
+            try:
+                groups = int(row["groups"])
+                max_releases = int(row["max_releases"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("metrics.csv contains invalid repeated-release counts") from error
+            if groups <= 0 or max_releases <= 0:
+                raise ValueError("metrics.csv contains invalid repeated-release counts")
     return schema_version
 
 
