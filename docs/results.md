@@ -11,11 +11,19 @@
 - Tangent dimensions: 253
 - Noise seeds: 5
 - Hardware: Intel Core i7-1255U, 12 logical CPUs, 18 GiB RAM
-- Wall-clock runtime: 8 minutes 37 seconds
-- Peak resident memory: 2.05 GiB
+- Wall-clock runtime: 9 minutes 19 seconds
+- Peak resident memory: not captured for the published rerun
 
 The complete aggregate output is stored in
-[`docs/results/v0.1/summary.json`](results/v0.1/summary.json).
+[`docs/results/v0.1/summary.json`](results/v0.1/summary.json). The
+auditable run directory is stored in
+[`docs/results/v0.1/run/`](results/v0.1/run/) and contains the resolved
+configuration, raw metric table, manifest, environment versions, aggregate
+summary, and plot. It can be checked with:
+
+```bash
+uv run nepra validate-run docs/results/v0.1/run
+```
 
 ## Diagnostics
 
@@ -33,7 +41,10 @@ clipping alone changed motor-task accuracy by only 0.12 percentage points.
 ## Privacy-Utility Results
 
 Balanced accuracy is shown below. Motor-task chance is 25%; identity chance is
-11.11%.
+11.11%. Motor-task intervals are percentile bootstrap intervals over the nine
+subject means. Identity-attack intervals are available in the JSON artifacts;
+for randomized conditions they bootstrap over the five benchmark seeds, while
+deterministic clean and clipped conditions report `null` intervals.
 
 | Condition | Epsilon | Motor task | 95% subject bootstrap CI | Strongest identity attack |
 |---|---:|---:|---:|---:|
@@ -70,4 +81,3 @@ the trade-off in this setup.
 These findings do not prove that adaptive perturbation is generally
 ineffective. They show that this specific weighting rule, representation,
 calibration, and noise budget did not produce a useful operating point.
-
