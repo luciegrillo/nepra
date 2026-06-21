@@ -6,6 +6,7 @@ import csv
 import importlib.metadata
 import json
 import platform
+import shutil
 import subprocess
 import sys
 from collections import defaultdict
@@ -50,9 +51,13 @@ ATTACK_METRICS = (
 
 
 def _git_commit() -> str | None:
+    git = shutil.which("git")
+    if git is None:
+        return None
     try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+        # The executable is resolved to an absolute path and all arguments are constant.
+        return subprocess.run(  # noqa: S603
+            [git, "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
             text=True,
