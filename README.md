@@ -67,7 +67,8 @@ four-class motor task to approximately its 25% chance level. The adaptive
 heuristic did not improve the observed trade-off. This negative result is part
 of the benchmark, not hidden behind a selected operating point.
 
-See the [complete results](docs/results.md) and generated
+See the [complete results](docs/results.md), the validated
+[v0.1 run artifacts](docs/results/v0.1/run/), and the generated
 [privacy-utility plot](docs/results/v0.1/privacy-utility.png).
 
 ## Intended Use

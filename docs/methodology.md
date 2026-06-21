@@ -63,6 +63,8 @@ under the inverse covariance metric.
 - The held-out session is used only for final transformation and evaluation.
 - Both clean-trained and mechanism-aware identity attackers are tested.
 - The strongest observed identity attack is reported for each condition.
-- Results use descriptive metrics and subject-bootstrap intervals rather than
-  significance tests over dependent cross-validation folds.
-
+- Results use descriptive metrics rather than significance tests over dependent
+  cross-validation folds.
+- Utility intervals bootstrap subject-level means. Identity-attack intervals
+  bootstrap seed-level attack scores for randomized conditions; deterministic
+  clean and clipped conditions have no seed interval.

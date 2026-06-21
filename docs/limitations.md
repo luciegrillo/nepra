@@ -14,6 +14,9 @@ NEPRA is a small benchmark, not a privacy certification.
   expected noise energy does not prove differential privacy.
 - Identity-attack performance measures the attacks included in this benchmark.
   A failed classifier is not proof of anonymity.
+- Identity-attack intervals summarize variation across benchmark seeds for the
+  tested attack suite. They do not measure population-level uncertainty or
+  protection against stronger adversaries.
 
 ## Experimental Scope
 
@@ -34,4 +37,3 @@ NEPRA is a small benchmark, not a privacy certification.
 - Secure mode requires fresh secret randomness for every release.
 - Raw EEG data remains under its original dataset terms and is never
   redistributed by this repository.
-
