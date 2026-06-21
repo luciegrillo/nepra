@@ -1,0 +1,57 @@
+schema_version: 1
+run:
+  name: bnci2014-demo
+  output_dir: artifacts/runs
+dataset:
+  name: BNCI2014_001
+  subjects:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  classes:
+  - left_hand
+  - right_hand
+  - feet
+  - tongue
+  cache_dir: /home/lucie/.cache/nepra
+  resample_hz: 160.0
+  fmin: 8.0
+  fmax: 30.0
+  tmin: 0.0
+  tmax: 4.0
+  trials_per_class: 0
+  channels: 0
+privacy:
+  epsilons:
+  - 0.5
+  - 1.0
+  - 2.0
+  - 4.0
+  - 8.0
+  delta: 1.0e-05
+  clipping_percentile: 95.0
+  weight_floor: 0.25
+  weight_exponent: 1.0
+  seeds:
+  - 42
+  - 123
+  - 456
+  - 789
+  - 101112
+models:
+  task_c: 1.0
+  attacker_c: 1.0
+  rf_estimators: 200
+  mlp_hidden:
+  - 128
+  - 64
+  max_iter: 500
+evaluation:
+  bootstrap_samples: 2000
+  n_jobs: -1

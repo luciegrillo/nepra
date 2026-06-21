@@ -1,0 +1,26 @@
+{
+  "artifact_schema_version": 1,
+  "classes": [
+    "left_hand",
+    "right_hand",
+    "feet",
+    "tongue"
+  ],
+  "dataset": "BNCI2014_001",
+  "git_commit": "a0a0bcc3665e94efca3619b9262f5e89898d8142",
+  "protected_session": "1test",
+  "public_calibration_session": "0train",
+  "run_id": "20260621T225337857326Z-bnci2014-demo",
+  "status": "completed",
+  "subjects": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ]
+}
