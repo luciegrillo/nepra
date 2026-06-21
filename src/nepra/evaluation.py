@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,6 +34,7 @@ LabelArray = NDArray[np.str_]
 class Condition:
     """One train/test representation pair evaluated by the benchmark."""
 
+    dataset: str
     name: str
     epsilon: float | None
     seed: int | None
@@ -42,6 +44,7 @@ class Condition:
 
 @dataclass(frozen=True)
 class TaskScore:
+    dataset: str
     condition: str
     epsilon: float | None
     seed: int | None
@@ -52,6 +55,7 @@ class TaskScore:
 
 @dataclass(frozen=True)
 class AttackScore:
+    dataset: str
     condition: str
     epsilon: float | None
     seed: int | None
@@ -61,6 +65,18 @@ class AttackScore:
     macro_f1: float
     advantage_over_chance: float
     session_accuracy: float
+
+
+@dataclass(frozen=True)
+class DatasetBenchmarkResult:
+    dataset: str
+    calibration_clipping: ClippingDiagnostics
+    heldout_clipping: ClippingDiagnostics
+    task_weights: TaskWeightModel
+    feature_dimensions: int
+    calibration_trials: int
+    heldout_trials: int
+    elapsed_seconds: float
 
 
 @dataclass(frozen=True)
@@ -74,6 +90,7 @@ class BenchmarkResult:
     calibration_trials: int
     heldout_trials: int
     elapsed_seconds: float
+    dataset_results: tuple[DatasetBenchmarkResult, ...]
 
 
 @dataclass(frozen=True)
@@ -120,6 +137,7 @@ def _evaluate_task(
         predictions = decoder.predict(test.features)
         scores.append(
             TaskScore(
+                dataset=condition.dataset,
                 condition=condition.name,
                 epsilon=condition.epsilon,
                 seed=condition.seed,
@@ -162,6 +180,7 @@ def _score_attackers(
         balanced_accuracy = float(balanced_accuracy_score(heldout.subject_labels, predictions))
         scores.append(
             AttackScore(
+                dataset=condition.dataset,
                 condition=condition.name,
                 epsilon=condition.epsilon,
                 seed=condition.seed,
@@ -178,6 +197,7 @@ def _score_attackers(
 
 def _conditions(
     *,
+    dataset: str,
     clean_calibration: FeatureDataset,
     clean_heldout: FeatureDataset,
     clipped_calibration: FeatureDataset,
@@ -188,6 +208,7 @@ def _conditions(
 ) -> list[Condition]:
     conditions = [
         Condition(
+            dataset=dataset,
             name="clean",
             epsilon=None,
             seed=None,
@@ -195,6 +216,7 @@ def _conditions(
             heldout=clean_heldout,
         ),
         Condition(
+            dataset=dataset,
             name="clipped",
             epsilon=None,
             seed=None,
@@ -219,6 +241,7 @@ def _conditions(
             )
             conditions.append(
                 Condition(
+                    dataset=dataset,
                     name="analytic_gaussian",
                     epsilon=epsilon,
                     seed=seed,
@@ -241,6 +264,7 @@ def _conditions(
             )
             conditions.append(
                 Condition(
+                    dataset=dataset,
                     name="task_weighted_empirical",
                     epsilon=epsilon,
                     seed=seed,
@@ -274,8 +298,13 @@ def bootstrap_mean_interval(
     return float(low), float(high)
 
 
-def run_benchmark(config: ExperimentConfig, dataset: EEGDataset) -> BenchmarkResult:
-    """Run the complete strict cross-session benchmark in memory."""
+def _run_single_dataset_benchmark(
+    config: ExperimentConfig,
+    *,
+    dataset_name: str,
+    dataset: EEGDataset,
+) -> BenchmarkResult:
+    """Run the strict cross-session benchmark for one dataset."""
     started = time.perf_counter()
     calibration, heldout = dataset.split_calibration_heldout()
 
@@ -297,6 +326,7 @@ def run_benchmark(config: ExperimentConfig, dataset: EEGDataset) -> BenchmarkRes
         seed=model_seed,
     )
     conditions = _conditions(
+        dataset=dataset_name,
         clean_calibration=clean_calibration,
         clean_heldout=clean_heldout,
         clipped_calibration=clipped_calibration_result.dataset,
@@ -333,14 +363,74 @@ def run_benchmark(config: ExperimentConfig, dataset: EEGDataset) -> BenchmarkRes
             )
         )
 
-    return BenchmarkResult(
-        task_scores=tuple(task_scores),
-        attack_scores=tuple(attack_scores),
+    elapsed_seconds = time.perf_counter() - started
+    dataset_result = DatasetBenchmarkResult(
+        dataset=dataset_name,
         calibration_clipping=clipped_calibration_result.diagnostics,
         heldout_clipping=clipped_heldout_result.diagnostics,
         task_weights=task_weights,
         feature_dimensions=clean_calibration.features.shape[1],
         calibration_trials=clean_calibration.features.shape[0],
         heldout_trials=clean_heldout.features.shape[0],
-        elapsed_seconds=time.perf_counter() - started,
+        elapsed_seconds=elapsed_seconds,
     )
+    return BenchmarkResult(
+        task_scores=tuple(task_scores),
+        attack_scores=tuple(attack_scores),
+        calibration_clipping=dataset_result.calibration_clipping,
+        heldout_clipping=dataset_result.heldout_clipping,
+        task_weights=dataset_result.task_weights,
+        feature_dimensions=dataset_result.feature_dimensions,
+        calibration_trials=dataset_result.calibration_trials,
+        heldout_trials=dataset_result.heldout_trials,
+        elapsed_seconds=elapsed_seconds,
+        dataset_results=(dataset_result,),
+    )
+
+
+def _merge_benchmark_results(results: list[BenchmarkResult]) -> BenchmarkResult:
+    if not results:
+        raise ValueError("at least one dataset result is required")
+    first = results[0]
+    return BenchmarkResult(
+        task_scores=tuple(score for result in results for score in result.task_scores),
+        attack_scores=tuple(score for result in results for score in result.attack_scores),
+        calibration_clipping=first.calibration_clipping,
+        heldout_clipping=first.heldout_clipping,
+        task_weights=first.task_weights,
+        feature_dimensions=first.feature_dimensions,
+        calibration_trials=sum(result.calibration_trials for result in results),
+        heldout_trials=sum(result.heldout_trials for result in results),
+        elapsed_seconds=sum(result.elapsed_seconds for result in results),
+        dataset_results=tuple(
+            dataset_result for result in results for dataset_result in result.dataset_results
+        ),
+    )
+
+
+def run_benchmark(
+    config: ExperimentConfig,
+    dataset: EEGDataset | Mapping[str, EEGDataset],
+) -> BenchmarkResult:
+    """Run the complete strict cross-session benchmark in memory."""
+    if isinstance(dataset, EEGDataset):
+        return _run_single_dataset_benchmark(
+            config,
+            dataset_name=config.dataset.name,
+            dataset=dataset,
+        )
+
+    results: list[BenchmarkResult] = []
+    for dataset_config in config.datasets:
+        try:
+            configured_dataset = dataset[dataset_config.name]
+        except KeyError as error:
+            raise ValueError(f"missing loaded dataset: {dataset_config.name}") from error
+        results.append(
+            _run_single_dataset_benchmark(
+                config,
+                dataset_name=dataset_config.name,
+                dataset=configured_dataset,
+            )
+        )
+    return _merge_benchmark_results(results)

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 
 import numpy as np
 
-from nepra.evaluation import BenchmarkResult, bootstrap_mean_interval
+from nepra.config import ExperimentConfig
+from nepra.data import EEGDataset
+from nepra.evaluation import BenchmarkResult, bootstrap_mean_interval, run_benchmark
 
 
 def test_benchmark_trains_personalized_tasks_and_pooled_attackers(
@@ -31,6 +34,8 @@ def test_benchmark_trains_personalized_tasks_and_pooled_attackers(
         "3",
         "4",
     }
+    assert {score.dataset for score in benchmark_result.task_scores} == {"synthetic"}
+    assert {score.dataset for score in benchmark_result.attack_scores} == {"synthetic"}
     assert {score.regime for score in benchmark_result.attack_scores} == {
         "clean_auxiliary",
         "mechanism_aware",
@@ -40,6 +45,38 @@ def test_benchmark_trains_personalized_tasks_and_pooled_attackers(
         "rbf_svm",
         "random_forest",
         "mlp",
+    }
+
+
+def test_benchmark_aggregates_configured_dataset_mapping(
+    smoke_config: ExperimentConfig,
+    synthetic_dataset: EEGDataset,
+) -> None:
+    second_dataset_config = replace(smoke_config.dataset, name="BNCI2014_004")
+    config = replace(
+        smoke_config,
+        datasets=(smoke_config.dataset, second_dataset_config),
+    )
+
+    result = run_benchmark(
+        config,
+        {
+            "synthetic": synthetic_dataset,
+            "BNCI2014_004": synthetic_dataset,
+        },
+    )
+
+    assert [dataset.dataset for dataset in result.dataset_results] == [
+        "synthetic",
+        "BNCI2014_004",
+    ]
+    assert {score.dataset for score in result.task_scores} == {
+        "synthetic",
+        "BNCI2014_004",
+    }
+    assert {score.dataset for score in result.attack_scores} == {
+        "synthetic",
+        "BNCI2014_004",
     }
 
 

@@ -39,8 +39,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _execute_benchmark(config_path: str) -> Path:
     config = load_config(config_path)
-    dataset = load_dataset(config.dataset)
-    result = run_benchmark(config, dataset)
+    datasets = {dataset.name: load_dataset(dataset) for dataset in config.datasets}
+    result = run_benchmark(config, datasets)
     return write_run(config, result)
 
 
