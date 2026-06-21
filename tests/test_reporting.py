@@ -55,12 +55,13 @@ def test_run_artifact_round_trip(
         reader = csv.DictReader(handle)
         assert set(reader.fieldnames or ()) == METRIC_COLUMNS
         rows = list(reader)
-        assert len(rows) == 192
+        assert len(rows) == 612
         assert {row["dataset"] for row in rows} == {"synthetic"}
         assert {row["scope"] for row in rows} == {
             "utility",
             "identity_attack",
             "open_set_identity_attack",
+            "repeated_release_identity_attack",
         }
 
     with (run_dir / "summary.json").open(encoding="utf-8") as handle:
@@ -72,6 +73,10 @@ def test_run_artifact_round_trip(
     assert {entry["dataset"] for entry in summary["entries"]} == {"synthetic"}
     assert all("strongest" in entry["identity_attack"] for entry in summary["entries"])
     assert all("strongest" in entry["open_set_identity_attack"] for entry in summary["entries"])
+    assert all(
+        "group_sizes" in entry["repeated_release_identity_attack"] for entry in summary["entries"]
+    )
+    assert all("privacy_composition_basic" in entry for entry in summary["entries"])
     for entry in summary["entries"]:
         for candidate in entry["identity_attack"]["all"]:
             assert candidate["observations"] == 1
@@ -82,6 +87,8 @@ def test_run_artifact_round_trip(
             assert candidate["observations"] == 1
             assert "auroc_mean" in candidate
             assert candidate["auroc_ci95"] is None
+        assert len(entry["repeated_release_identity_attack"]["group_sizes"]) == 5
+        assert len(entry["privacy_composition_basic"]) == 5
 
 
 def test_published_v01_run_validates() -> None:

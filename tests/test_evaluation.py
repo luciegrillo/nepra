@@ -18,6 +18,7 @@ def test_benchmark_trains_personalized_tasks_and_pooled_attackers(
     task_counts = Counter(score.condition for score in benchmark_result.task_scores)
     attack_counts = Counter(score.condition for score in benchmark_result.attack_scores)
     open_set_counts = Counter(score.condition for score in benchmark_result.open_set_scores)
+    repeated_counts = Counter(score.condition for score in benchmark_result.repeated_release_scores)
 
     assert task_counts == {
         "clean": 4,
@@ -32,6 +33,7 @@ def test_benchmark_trains_personalized_tasks_and_pooled_attackers(
         "task_weighted_empirical": 28,
     }
     assert open_set_counts == attack_counts
+    assert repeated_counts == {condition: count * 5 for condition, count in attack_counts.items()}
     assert {score.subject for score in benchmark_result.task_scores} == {
         "1",
         "2",
@@ -41,6 +43,7 @@ def test_benchmark_trains_personalized_tasks_and_pooled_attackers(
     assert {score.dataset for score in benchmark_result.task_scores} == {"synthetic"}
     assert {score.dataset for score in benchmark_result.attack_scores} == {"synthetic"}
     assert {score.dataset for score in benchmark_result.open_set_scores} == {"synthetic"}
+    assert {score.dataset for score in benchmark_result.repeated_release_scores} == {"synthetic"}
     assert {score.regime for score in benchmark_result.attack_scores} == {
         "clean_auxiliary",
         "mechanism_aware",
@@ -66,6 +69,18 @@ def test_benchmark_trains_personalized_tasks_and_pooled_attackers(
     assert all(0.0 <= score.auroc <= 1.0 for score in benchmark_result.open_set_scores)
     assert {score.enrolled_subjects for score in benchmark_result.open_set_scores} == {3}
     assert {score.unknown_subjects for score in benchmark_result.open_set_scores} == {1}
+    assert {score.group_size for score in benchmark_result.repeated_release_scores} == {
+        "1",
+        "4",
+        "16",
+        "64",
+        "all",
+    }
+    assert all(
+        0.0 <= score.group_accuracy <= 1.0 for score in benchmark_result.repeated_release_scores
+    )
+    assert all(score.groups > 0 for score in benchmark_result.repeated_release_scores)
+    assert all(score.max_releases > 0 for score in benchmark_result.repeated_release_scores)
 
 
 def test_benchmark_aggregates_configured_dataset_mapping(
@@ -104,6 +119,10 @@ def test_benchmark_aggregates_configured_dataset_mapping(
         "BNCI2014_004",
     }
     assert {score.dataset for score in result.open_set_scores} == {
+        "synthetic",
+        "BNCI2014_004",
+    }
+    assert {score.dataset for score in result.repeated_release_scores} == {
         "synthetic",
         "BNCI2014_004",
     }

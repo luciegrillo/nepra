@@ -29,6 +29,8 @@ from nepra.models import build_identity_attackers, build_task_decoder
 
 FloatArray = NDArray[np.float64]
 LabelArray = NDArray[np.str_]
+ReleaseGroupSize = int | str
+REPEATED_RELEASE_GROUP_SIZES: tuple[ReleaseGroupSize, ...] = (1, 4, 16, 64, "all")
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,20 @@ class OpenSetAttackScore:
 
 
 @dataclass(frozen=True)
+class RepeatedReleaseScore:
+    dataset: str
+    condition: str
+    epsilon: float | None
+    seed: int | None
+    regime: str
+    attacker: str
+    group_size: str
+    group_accuracy: float
+    groups: int
+    max_releases: int
+
+
+@dataclass(frozen=True)
 class DatasetBenchmarkResult:
     dataset: str
     calibration_clipping: ClippingDiagnostics
@@ -98,6 +114,7 @@ class BenchmarkResult:
     task_scores: tuple[TaskScore, ...]
     attack_scores: tuple[AttackScore, ...]
     open_set_scores: tuple[OpenSetAttackScore, ...]
+    repeated_release_scores: tuple[RepeatedReleaseScore, ...]
     calibration_clipping: ClippingDiagnostics
     heldout_clipping: ClippingDiagnostics
     task_weights: TaskWeightModel
@@ -122,6 +139,10 @@ class FittedAttacker:
         if probabilities.ndim != 2:
             raise ValueError("attacker predict_proba must return a 2D array")
         return np.max(probabilities, axis=1)
+
+    def predict_from_probability(self, probabilities: FloatArray) -> str:
+        encoded = int(np.argmax(probabilities))
+        return str(self.label_encoder.inverse_transform([encoded])[0])
 
 
 def _derived_seed(seed: int, stream: int) -> int:
@@ -290,6 +311,69 @@ def _score_open_set_attackers(
     return scores
 
 
+def _release_groups(
+    indices: NDArray[np.int_], group_size: ReleaseGroupSize
+) -> tuple[NDArray[np.int_], ...]:
+    if group_size == "all":
+        return (indices,)
+    if not isinstance(group_size, int) or group_size <= 0:
+        raise ValueError(f"invalid repeated-release group size: {group_size}")
+    if len(indices) <= group_size:
+        return (indices,)
+    usable = (len(indices) // group_size) * group_size
+    return tuple(indices[start : start + group_size] for start in range(0, usable, group_size))
+
+
+def _score_repeated_release_attackers(
+    *,
+    attackers: dict[str, FittedAttacker],
+    heldout: FeatureDataset,
+    condition: Condition,
+    regime: str,
+    group_sizes: tuple[ReleaseGroupSize, ...] = REPEATED_RELEASE_GROUP_SIZES,
+) -> list[RepeatedReleaseScore]:
+    scores: list[RepeatedReleaseScore] = []
+    subjects = tuple(
+        sorted(
+            (str(subject) for subject in np.unique(heldout.subject_labels)), key=_natural_label_key
+        )
+    )
+    subject_indices = {
+        subject: np.flatnonzero(heldout.subject_labels == subject) for subject in subjects
+    }
+    for name, attacker in attackers.items():
+        probabilities = np.asarray(attacker.model.predict_proba(heldout.features), dtype=np.float64)
+        for group_size in group_sizes:
+            correct = 0
+            groups = 0
+            max_releases = 0
+            for subject, indices in subject_indices.items():
+                for group in _release_groups(indices, group_size):
+                    max_releases = max(max_releases, len(group))
+                    predicted = attacker.predict_from_probability(
+                        np.mean(probabilities[group], axis=0)
+                    )
+                    correct += int(predicted == subject)
+                    groups += 1
+            if groups == 0:
+                raise ValueError("repeated-release evaluation produced no groups")
+            scores.append(
+                RepeatedReleaseScore(
+                    dataset=condition.dataset,
+                    condition=condition.name,
+                    epsilon=condition.epsilon,
+                    seed=condition.seed,
+                    regime=regime,
+                    attacker=name,
+                    group_size=str(group_size),
+                    group_accuracy=correct / groups,
+                    groups=groups,
+                    max_releases=max_releases,
+                )
+            )
+    return scores
+
+
 def _conditions(
     *,
     dataset: str,
@@ -441,6 +525,7 @@ def _run_single_dataset_benchmark(
     task_scores: list[TaskScore] = []
     attack_scores: list[AttackScore] = []
     open_set_scores: list[OpenSetAttackScore] = []
+    repeated_release_scores: list[RepeatedReleaseScore] = []
     for condition in conditions:
         task_scores.extend(_evaluate_task(condition, config, model_seed))
         attack_scores.extend(
@@ -459,6 +544,14 @@ def _run_single_dataset_benchmark(
                 regime="clean_auxiliary",
                 enrolled_subjects=enrolled_subjects,
                 unknown_subjects=unknown_subjects,
+            )
+        )
+        repeated_release_scores.extend(
+            _score_repeated_release_attackers(
+                attackers=clean_attackers,
+                heldout=condition.heldout,
+                condition=condition,
+                regime="clean_auxiliary",
             )
         )
         mechanism_aware = (
@@ -493,6 +586,14 @@ def _run_single_dataset_benchmark(
                 unknown_subjects=unknown_subjects,
             )
         )
+        repeated_release_scores.extend(
+            _score_repeated_release_attackers(
+                attackers=mechanism_aware,
+                heldout=condition.heldout,
+                condition=condition,
+                regime="mechanism_aware",
+            )
+        )
 
     elapsed_seconds = time.perf_counter() - started
     dataset_result = DatasetBenchmarkResult(
@@ -509,6 +610,7 @@ def _run_single_dataset_benchmark(
         task_scores=tuple(task_scores),
         attack_scores=tuple(attack_scores),
         open_set_scores=tuple(open_set_scores),
+        repeated_release_scores=tuple(repeated_release_scores),
         calibration_clipping=dataset_result.calibration_clipping,
         heldout_clipping=dataset_result.heldout_clipping,
         task_weights=dataset_result.task_weights,
@@ -528,6 +630,9 @@ def _merge_benchmark_results(results: list[BenchmarkResult]) -> BenchmarkResult:
         task_scores=tuple(score for result in results for score in result.task_scores),
         attack_scores=tuple(score for result in results for score in result.attack_scores),
         open_set_scores=tuple(score for result in results for score in result.open_set_scores),
+        repeated_release_scores=tuple(
+            score for result in results for score in result.repeated_release_scores
+        ),
         calibration_clipping=first.calibration_clipping,
         heldout_clipping=first.heldout_clipping,
         task_weights=first.task_weights,
