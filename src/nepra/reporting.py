@@ -371,6 +371,211 @@ def _basic_composition(
     return entries
 
 
+def _hierarchical_mean_interval(
+    groups: list[list[float]],
+    *,
+    config: ExperimentConfig,
+) -> tuple[float, list[float] | None]:
+    cleaned = [np.asarray(group, dtype=np.float64) for group in groups if group]
+    if not cleaned:
+        raise ValueError("hierarchical summary requires at least one group")
+    mean = float(np.mean([np.mean(group) for group in cleaned]))
+    if len(cleaned) < 2:
+        return mean, None
+    rng = np.random.default_rng(config.privacy.seeds[0])
+    sampled_means: list[float] = []
+    for _ in range(config.evaluation.bootstrap_samples):
+        sampled_groups = rng.integers(0, len(cleaned), size=len(cleaned))
+        values: list[float] = []
+        for group_index in sampled_groups:
+            group = cleaned[int(group_index)]
+            sampled_values = group[rng.integers(0, len(group), size=len(group))]
+            values.append(float(np.mean(sampled_values)))
+        sampled_means.append(float(np.mean(values)))
+    low, high = np.quantile(sampled_means, [0.025, 0.975])
+    return mean, [float(low), float(high)]
+
+
+def _mean_ci_from_values(
+    values: list[float],
+    *,
+    config: ExperimentConfig,
+) -> dict[str, Any]:
+    mean, interval = _mean_and_interval(values, config=config)
+    return {"mean": mean, "ci95": interval, "datasets": len(values)}
+
+
+def _paired_delta_summary(
+    *,
+    utility_means: dict[tuple[str, str, float | None], float],
+    identity_means: dict[tuple[str, str, float | None], float],
+    datasets: list[str],
+    condition: str,
+    epsilon: float | None,
+    baseline: str,
+    config: ExperimentConfig,
+) -> dict[str, Any]:
+    utility_changes: list[float] = []
+    identity_reductions: list[float] = []
+    for dataset in datasets:
+        key = (dataset, condition, epsilon)
+        baseline_key = (dataset, baseline, None)
+        if key not in utility_means or baseline_key not in utility_means:
+            continue
+        if key not in identity_means or baseline_key not in identity_means:
+            continue
+        utility_changes.append(utility_means[key] - utility_means[baseline_key])
+        identity_reductions.append(identity_means[baseline_key] - identity_means[key])
+    return {
+        "utility_change": _mean_ci_from_values(utility_changes, config=config),
+        "identity_reduction": _mean_ci_from_values(identity_reductions, config=config),
+    }
+
+
+def _hierarchical_scientific_summary(
+    config: ExperimentConfig,
+    result: BenchmarkResult,
+) -> dict[str, Any]:
+    dataset_names = [dataset.name for dataset in config.datasets]
+    utility_groups: dict[tuple[str, float | None], list[list[float]]] = defaultdict(list)
+    utility_means: dict[tuple[str, str, float | None], float] = {}
+    utility_by_dataset: dict[tuple[str, str, float | None], dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for score in result.task_scores:
+        utility_by_dataset[(score.dataset, score.condition, score.epsilon)][score.subject].append(
+            score.balanced_accuracy
+        )
+    for key, subjects in utility_by_dataset.items():
+        subject_means = [float(np.mean(values)) for values in subjects.values()]
+        utility_means[key] = float(np.mean(subject_means))
+        utility_groups[(key[1], key[2])].append(subject_means)
+
+    identity_groups, identity_means = _strongest_metric_groups(
+        result.attack_scores,
+        metric="balanced_accuracy",
+    )
+    open_set_groups, _ = _strongest_metric_groups(result.open_set_scores, metric="auroc")
+    repeated_groups, _ = _strongest_repeated_groups(result)
+
+    entries: list[dict[str, Any]] = []
+    for condition, epsilon in sorted(
+        utility_groups,
+        key=lambda item: (item[0], float("-inf") if item[1] is None else item[1]),
+    ):
+        utility_mean, utility_ci = _hierarchical_mean_interval(
+            utility_groups[(condition, epsilon)], config=config
+        )
+        identity_mean, identity_ci = _hierarchical_mean_interval(
+            identity_groups[(condition, epsilon)], config=config
+        )
+        open_mean, open_ci = _hierarchical_mean_interval(
+            open_set_groups[(condition, epsilon)], config=config
+        )
+        repeated_entries = []
+        for group_size, groups in repeated_groups[(condition, epsilon)].items():
+            mean, interval = _hierarchical_mean_interval(groups, config=config)
+            repeated_entries.append(
+                {
+                    "group_size": group_size,
+                    "group_accuracy_mean": mean,
+                    "group_accuracy_ci95": interval,
+                }
+            )
+        entries.append(
+            {
+                "condition": condition,
+                "epsilon": epsilon,
+                "datasets": len(utility_groups[(condition, epsilon)]),
+                "utility": {
+                    "balanced_accuracy_mean": utility_mean,
+                    "balanced_accuracy_ci95": utility_ci,
+                },
+                "identity_attack": {
+                    "balanced_accuracy_mean": identity_mean,
+                    "balanced_accuracy_ci95": identity_ci,
+                },
+                "open_set_identity_attack": {
+                    "auroc_mean": open_mean,
+                    "auroc_ci95": open_ci,
+                },
+                "repeated_release_identity_attack": {
+                    "group_sizes": sorted(
+                        repeated_entries, key=lambda item: _group_size_key(item["group_size"])
+                    )
+                },
+                "paired_deltas": {
+                    "vs_clean": _paired_delta_summary(
+                        utility_means=utility_means,
+                        identity_means=identity_means,
+                        datasets=dataset_names,
+                        condition=condition,
+                        epsilon=epsilon,
+                        baseline="clean",
+                        config=config,
+                    ),
+                    "vs_clipped": _paired_delta_summary(
+                        utility_means=utility_means,
+                        identity_means=identity_means,
+                        datasets=dataset_names,
+                        condition=condition,
+                        epsilon=epsilon,
+                        baseline="clipped",
+                        config=config,
+                    ),
+                },
+            }
+        )
+    return {
+        "method": "dataset_subject_seed_hierarchical_bootstrap",
+        "entries": entries,
+    }
+
+
+def _strongest_metric_groups(
+    scores: tuple[Any, ...],
+    *,
+    metric: str,
+) -> tuple[
+    dict[tuple[str, float | None], list[list[float]]], dict[tuple[str, str, float | None], float]
+]:
+    grouped: dict[tuple[str, str, float | None], dict[tuple[str, str], list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for score in scores:
+        grouped[(score.dataset, score.condition, score.epsilon)][
+            (score.regime, score.attacker)
+        ].append(float(getattr(score, metric)))
+
+    aggregate: dict[tuple[str, float | None], list[list[float]]] = defaultdict(list)
+    means: dict[tuple[str, str, float | None], float] = {}
+    for key, candidates in grouped.items():
+        values = max(candidates.values(), key=lambda item: float(np.mean(item)))
+        means[key] = float(np.mean(values))
+        aggregate[(key[1], key[2])].append(values)
+    return aggregate, means
+
+
+def _strongest_repeated_groups(
+    result: BenchmarkResult,
+) -> tuple[dict[tuple[str, float | None], dict[str, list[list[float]]]], dict[str, float]]:
+    grouped: dict[tuple[str, str, float | None, str], dict[tuple[str, str], list[float]]] = (
+        defaultdict(lambda: defaultdict(list))
+    )
+    for score in result.repeated_release_scores:
+        grouped[(score.dataset, score.condition, score.epsilon, score.group_size)][
+            (score.regime, score.attacker)
+        ].append(float(score.group_accuracy))
+
+    aggregate: dict[tuple[str, float | None], dict[str, list[list[float]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for key, candidates in grouped.items():
+        values = max(candidates.values(), key=lambda item: float(np.mean(item)))
+        aggregate[(key[1], key[2])][key[3]].append(values)
+    return aggregate, {}
+
+
 def build_summary(config: ExperimentConfig, result: BenchmarkResult) -> dict[str, Any]:
     """Aggregate utility by subject and identity leakage by strongest attack."""
     utility = _utility_summary(result, config)
@@ -434,6 +639,7 @@ def build_summary(config: ExperimentConfig, result: BenchmarkResult) -> dict[str
         "run_name": config.run.name,
         "datasets": [dataset.name for dataset in config.datasets],
         "entries": entries,
+        "hierarchical_summary": _hierarchical_scientific_summary(config, result),
         "dataset_summaries": dataset_summaries,
         "clipping": {
             "calibration": asdict(result.calibration_clipping),
@@ -490,6 +696,98 @@ def _plot_tradeoff(summary: dict[str, Any], output_path: Path) -> None:
     axis.set_title("NEPRA privacy-utility benchmark")
     axis.grid(alpha=0.25)
     axis.legend(fontsize=7, loc="best")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
+def _plot_hierarchical_ci(summary: dict[str, Any], output_path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    entries = summary["hierarchical_summary"]["entries"]
+    fig, axis = plt.subplots(figsize=(7.2, 5.0))
+    for entry in entries:
+        utility = entry["utility"]["balanced_accuracy_mean"]
+        leakage = entry["identity_attack"]["balanced_accuracy_mean"]
+        utility_ci = entry["utility"]["balanced_accuracy_ci95"]
+        leakage_ci = entry["identity_attack"]["balanced_accuracy_ci95"]
+        xerr = (
+            None if leakage_ci is None else [[leakage - leakage_ci[0]], [leakage_ci[1] - leakage]]
+        )
+        yerr = (
+            None if utility_ci is None else [[utility - utility_ci[0]], [utility_ci[1] - utility]]
+        )
+        label = (
+            entry["condition"]
+            if entry["epsilon"] is None
+            else f"{entry['condition']}, eps={entry['epsilon']:g}"
+        )
+        axis.errorbar(leakage, utility, xerr=xerr, yerr=yerr, fmt="o", capsize=3, label=label)
+    axis.set_xlabel("Hierarchical strongest identity balanced accuracy")
+    axis.set_ylabel("Hierarchical motor-task balanced accuracy")
+    axis.set_title("Aggregate privacy-utility with hierarchical CI")
+    axis.grid(alpha=0.25)
+    axis.legend(fontsize=7, loc="best")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
+def _plot_repeated_release(summary: dict[str, Any], output_path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    positions = {"1": 1, "4": 4, "16": 16, "64": 64, "all": 128}
+    fig, axis = plt.subplots(figsize=(7.2, 5.0))
+    for entry in summary["hierarchical_summary"]["entries"]:
+        group_entries = entry["repeated_release_identity_attack"]["group_sizes"]
+        x = [positions[item["group_size"]] for item in group_entries]
+        y = [item["group_accuracy_mean"] for item in group_entries]
+        label = (
+            entry["condition"]
+            if entry["epsilon"] is None
+            else f"{entry['condition']}, eps={entry['epsilon']:g}"
+        )
+        axis.plot(x, y, marker="o", linewidth=1.2, label=label)
+    axis.set_xscale("log", base=2)
+    axis.set_xticks(list(positions.values()), labels=list(positions))
+    axis.set_xlabel("Repeated releases grouped per subject")
+    axis.set_ylabel("Strongest group identification accuracy")
+    axis.set_title("Repeated-release identity leakage")
+    axis.grid(alpha=0.25)
+    axis.legend(fontsize=7, loc="best")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
+def _plot_open_set(summary: dict[str, Any], output_path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    entries = summary["hierarchical_summary"]["entries"]
+    labels = [
+        entry["condition"]
+        if entry["epsilon"] is None
+        else f"{entry['condition']}\neps={entry['epsilon']:g}"
+        for entry in entries
+    ]
+    values = [entry["open_set_identity_attack"]["auroc_mean"] for entry in entries]
+    fig, axis = plt.subplots(figsize=(max(7.2, 0.55 * len(entries)), 5.0))
+    axis.bar(range(len(entries)), values, color="#4c78a8")
+    axis.axhline(0.5, color="black", linestyle="--", linewidth=1)
+    axis.set_xticks(range(len(entries)), labels=labels, rotation=45, ha="right")
+    axis.set_ylim(0.0, 1.0)
+    axis.set_ylabel("Strongest open-set AUROC")
+    axis.set_title("Open-set identity recognition")
+    axis.grid(axis="y", alpha=0.25)
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
@@ -569,6 +867,10 @@ def write_run(
         manifest,
     )
     _plot_tradeoff(summary, plots_dir / "privacy-utility.png")
+    _plot_tradeoff(summary, plots_dir / "privacy-utility-by-dataset.png")
+    _plot_hierarchical_ci(summary, plots_dir / "hierarchical-ci.png")
+    _plot_repeated_release(summary, plots_dir / "repeated-release-leakage.png")
+    _plot_open_set(summary, plots_dir / "open-set-auroc.png")
     validate_run(run_dir)
     return run_dir
 
@@ -687,6 +989,9 @@ def _validate_summary(summary: dict[str, Any]) -> int:
         dataset_summaries = summary.get("dataset_summaries")
         if not isinstance(dataset_summaries, list) or not dataset_summaries:
             raise ValueError("summary.json contains invalid dataset summaries")
+        hierarchical = summary.get("hierarchical_summary")
+        if not isinstance(hierarchical, dict) or not isinstance(hierarchical.get("entries"), list):
+            raise ValueError("summary.json contains invalid hierarchical summary")
     entries = summary.get("entries")
     if not isinstance(entries, list) or not entries:
         raise ValueError("run summary has no benchmark entries")
@@ -808,3 +1113,13 @@ def validate_run(path: str | Path) -> None:
     plot = run_dir / "plots" / "privacy-utility.png"
     if not plot.is_file() or plot.stat().st_size == 0:
         raise ValueError("run contains no privacy-utility plot")
+    if manifest_version == 2:
+        for plot_name in (
+            "privacy-utility-by-dataset.png",
+            "hierarchical-ci.png",
+            "repeated-release-leakage.png",
+            "open-set-auroc.png",
+        ):
+            plot_path = run_dir / "plots" / plot_name
+            if not plot_path.is_file() or plot_path.stat().st_size == 0:
+                raise ValueError(f"run contains no {plot_name} plot")
